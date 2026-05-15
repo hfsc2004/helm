@@ -1,15 +1,16 @@
 # Vehicles
 
-Per-vehicle adapter modules. Each module implements a common interface defined in `shared/vehicle-contract.ts` and translates the app's neutral commands into whatever protocol the physical vehicle speaks.
+Per-vehicle adapter modules and the vehicle registry.
 
-## Planned modules
+## What's here
 
-- `ground-skidsteer.ts` — ESP32 + L298N skid-steer ground robot over HTTP/WiFi
-- `air-quadcopter.ts` — (future) ESP32-S3 + Pico 2 quadcopter with SNN/STDP flight control
+- `registry.ts` — persistent vehicle list under `<dataDir>/registry.json`. Capped at `STORAGE_LIMITS.registryVehicles` (64).
+- `ground-skidsteer.ts` — adapter for the ESP32 skid-steer firmware. HTTP/WiFi transport. Typed `SkidSteerAction` commands.
 
-## Adding a new vehicle
+## Adding a new vehicle type
 
-1. Create `vehicles/<kind>-<variant>.ts`
-2. Implement the vehicle interface
-3. Declare capabilities the UI/LLM planner should respect
-4. Register the module so the app can list it
+1. Add the kind/capability values to `shared/vehicle-contract.ts`
+2. Create `core/vehicles/<kind>-<variant>.ts` with `health()`, `getState()`, `sendCommand()`, `emergencyStop()` at minimum
+3. CLI consumers route to the right adapter based on the vehicle's declared `kind` and `capabilities`
+
+The vehicle contract is intentionally narrow (no abstract base class, no plugin loader). Adapters are concrete modules; the dispatch happens at the call site by reading `vehicle.kind`.

@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import { emit } from "../output.js";
 import { register, all, type RuntimeCommand } from "../registry.js";
@@ -9,8 +8,6 @@ import {
   GLOBAL_FLAGS,
   type CliSchema,
 } from "../../core/schema.js";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 function readVersion(): string {
   const pkgPath = join(__dirname, "..", "..", "package.json");

@@ -16,6 +16,7 @@ import "./commands/privacy.js";
 import "./commands/describe.js";
 import "./commands/voice.js";
 import "./commands/hardware.js";
+import "./commands/vehicle.js";
 
 const USAGE = `helm <command> [args] [flags]
 
@@ -75,10 +76,14 @@ async function main(): Promise<void> {
     fatal(`Unknown command: ${parsed.command}\n\n${USAGE}`, 64);
   }
 
-  const exitCode = await cmd.run({
-    args: {},
-    flags: parsed.flags,
+  // Map positional args by their declared order in the command definition.
+  const args: Record<string, string | number | boolean> = {};
+  cmd.def.args.forEach((argDef, i) => {
+    const value = parsed.args[i];
+    if (value !== undefined) args[argDef.name] = value;
   });
+
+  const exitCode = await cmd.run({ args, flags: parsed.flags });
   process.exit(exitCode);
 }
 

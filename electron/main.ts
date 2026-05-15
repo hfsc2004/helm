@@ -1,8 +1,5 @@
 import { app, BrowserWindow } from "electron";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { join } from "node:path";
 
 const isDev = !app.isPackaged;
 const DEV_URL = "http://localhost:5173";
@@ -27,7 +24,11 @@ function createWindow(): void {
 
   if (isDev) {
     void mainWindow.loadURL(DEV_URL);
-    mainWindow.webContents.openDevTools({ mode: "detach" });
+    // DevTools only when explicitly requested (HELM_DEVTOOLS=1).
+    // F12 / Ctrl+Shift+I still toggles it on demand.
+    if (process.env["HELM_DEVTOOLS"] === "1") {
+      mainWindow.webContents.openDevTools({ mode: "detach" });
+    }
   } else {
     void mainWindow.loadFile(join(__dirname, "../dist/index.html"));
   }

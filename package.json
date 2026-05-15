@@ -5,14 +5,13 @@
   "author": "Pseudo Science Fiction",
   "license": "Apache-2.0",
   "main": "dist-electron/electron/main.js",
-  "type": "module",
   "bin": {
     "helm": "./dist-cli/cli/helm.js"
   },
   "scripts": {
     "helm-ui": "concurrently -k -n vite,electron -c blue,magenta \"npm:helm-ui:renderer\" \"npm:helm-ui:main\"",
     "helm-ui:renderer": "vite",
-    "helm-ui:main": "wait-on tcp:5173 && tsx watch electron/main.ts",
+    "helm-ui:main": "wait-on tcp:5173 && tsc -p electron/tsconfig.json && electron .",
     "helm": "tsx cli/helm.ts",
     "build": "npm run build:renderer && npm run build:electron && npm run build:cli",
     "build:renderer": "vite build",

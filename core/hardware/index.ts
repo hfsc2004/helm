@@ -8,18 +8,12 @@
  * "modernize" the implementation; it works.
  */
 
-import { createRequire } from "node:module";
-
-const require = createRequire(import.meta.url);
-
 // Verbatim CommonJS modules from PSF Core.
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const detector = require("./gpu-detector.js") as {
   detectAll(appDir: string): Promise<HardwareInfo>;
   classifyForInference(hardware: HardwareInfo): GpuClassification;
 };
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const createStartupGpuTools = require("./gpu-select.js") as (deps: {
   execFileSync: typeof import("node:child_process").execFileSync;
 }) => {

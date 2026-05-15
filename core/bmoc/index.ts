@@ -14,11 +14,9 @@
  * stop. Route through BMOC.
  */
 
-import { createRequire } from "node:module";
-
-const require = createRequire(import.meta.url);
-
 // Verbatim CommonJS modules from PSF Core.
+// `require` is available in CJS context (the module system both this file
+// and the .js siblings compile to).
 const processUtils = require("./session-manager-process-utils.js") as {
   isProcessRunning(pid: number): Promise<boolean>;
   killProcess(pid: number, signal?: string): Promise<boolean>;

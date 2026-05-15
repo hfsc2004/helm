@@ -1,0 +1,57 @@
+# Node / npm
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+.yarn/
+
+# Electron build output
+dist/
+out/
+build/
+release/
+*.app/
+*.exe
+*.dmg
+*.AppImage
+*.deb
+*.snap
+*.msi
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local config / runtime state
+.psf/
+data/
+logs/
+*.log
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Coverage / test artifacts
+coverage/
+.nyc_output/
+
+# TypeScript / cache
+*.tsbuildinfo
+.cache/
+.parcel-cache/
+
+# Model files (large; users bring their own)
+*.gguf
+models/
+!models/.gitkeep

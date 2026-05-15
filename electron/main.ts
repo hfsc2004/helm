@@ -1,8 +1,23 @@
 import { app, BrowserWindow } from "electron";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
+
+import * as bmoc from "../core/bmoc/index.js";
+import { registerIpcHandlers } from "./ipc/index.js";
 
 const isDev = !app.isPackaged;
 const DEV_URL = "http://localhost:5173";
+
+function readVersion(): string {
+  try {
+    const pkg = JSON.parse(
+      readFileSync(join(__dirname, "..", "..", "package.json"), "utf8")
+    ) as { version?: string };
+    return pkg.version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -24,8 +39,6 @@ function createWindow(): void {
 
   if (isDev) {
     void mainWindow.loadURL(DEV_URL);
-    // DevTools only when explicitly requested (HELM_DEVTOOLS=1).
-    // F12 / Ctrl+Shift+I still toggles it on demand.
     if (process.env["HELM_DEVTOOLS"] === "1") {
       mainWindow.webContents.openDevTools({ mode: "detach" });
     }
@@ -39,11 +52,26 @@ function createWindow(): void {
 }
 
 void app.whenReady().then(() => {
+  // Initialize BMOC first so anything spawned/registered later goes through it.
+  bmoc.initialize(__dirname);
+  registerIpcHandlers({ version: readVersion() });
   createWindow();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+app.on("before-quit", async (event) => {
+  // Reap every BMOC-tracked session (subscriptions, child processes) before
+  // the process exits.
+  event.preventDefault();
+  try {
+    await bmoc.closeAllSessions();
+  } catch {
+    // Best effort; never block shutdown indefinitely.
+  }
+  app.exit(0);
 });
 
 app.on("window-all-closed", () => {

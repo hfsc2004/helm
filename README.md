@@ -11,14 +11,6 @@ Cross-platform: Linux, macOS, Windows.
 
 Early development. Foundation phase.
 
-## What PSF Helm does NOT do
-
-Nothing in PSF Helm phones home. No analytics, no error reporting, no user tracking, no cloud accounts. Vehicle state ("telemetry" in robotics terminology) refers to data the vehicle reports about itself — battery voltage, motor speed, signal strength — and stays on your machine. If a future version ever adds any outbound network traffic of any kind, it will be opt-in and disclosed prominently. 🐤
-
-Voice (STT) runs locally via whisper.cpp. Your speech is never transmitted; it's transcribed on your machine and discarded after the command is executed. 🐤
-
-Voice is optional. If you choose to install it, Helm makes one-time outbound connections to GitHub to fetch the whisper.cpp and piper engine binaries. After install, no further outbound calls. Remove voice any time from Settings or with `helm voice-uninstall --confirm`. 🐤
-
 ## What It Does
 
 - Pair with a robot or drone over your local network
@@ -40,8 +32,36 @@ Voice is optional. If you choose to install it, Helm makes one-time outbound con
 
 | Vehicle | Status |
 |---|---|
-| ESP32 skid-steer ground robot (HTTP/WiFi) | In progress |
+| ESP32 skid-steer ground robot (HTTP/WiFi) | Wire-level driving in v0.1 |
 | ESP32-S3 + Pico 2 quadcopter with SNN/STDP flight control | Planned |
+
+## Driving (CLI, v0.1)
+
+The CLI works today with the ESP32 skid-steer firmware in `firmware/ground-skidsteer/`.
+
+```bash
+# Register your robot
+npm run helm -- vehicle-add 172.20.0.15 --name truck-01
+
+# List registered vehicles
+npm run helm -- vehicle-list
+
+# Check it's reachable
+npm run helm -- vehicle-health <vehicle-id>
+
+# Watch live state (streaming NDJSON; Ctrl-C to stop)
+npm run helm -- state <vehicle-id> --follow
+
+# Drive
+npm run helm -- cmd <vehicle-id> fwd --speed 160 --ms 2000
+npm run helm -- cmd <vehicle-id> turn --speed -120 --ms 400
+npm run helm -- cmd <vehicle-id> tank --left 120 --right -90
+
+# Stop now
+npm run helm -- stop <vehicle-id>
+```
+
+The natural-language path (`helm drive <id> "go forward 2 seconds"`) is planned for v0.2 — it needs the LLM planner.
 
 ## Requirements
 
@@ -80,6 +100,14 @@ Apache-2.0 (planned). See `LICENSE`.
 ## Family
 
 PSF Helm is part of the PSF product family alongside [PSF Core](https://github.com/hfsc2004/) and other tools. Helm is the consumer-facing driving app; the larger industrial orchestration platform lives elsewhere.
+
+## What PSF Helm does NOT do
+
+Nothing in PSF Helm phones home. No analytics, no error reporting, no user tracking, no cloud accounts. Vehicle state ("telemetry" in robotics terminology) refers to data the vehicle reports about itself — battery voltage, motor speed, signal strength — and stays on your machine. If a future version ever adds any outbound network traffic of any kind, it will be opt-in and disclosed prominently. 🐤
+
+Voice (STT) runs locally via whisper.cpp. Your speech is never transmitted; it's transcribed on your machine and discarded after the command is executed. 🐤
+
+Voice is optional. If you choose to install it, Helm makes one-time outbound connections to GitHub to fetch the whisper.cpp and piper engine binaries. After install, no further outbound calls. Remove voice any time from Settings or with `helm voice-uninstall --confirm`. 🐤
 
 ---
 

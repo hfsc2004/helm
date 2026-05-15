@@ -35,6 +35,44 @@ Early development. Foundation phase.
 | ESP32 skid-steer ground robot (HTTP/WiFi) | Wire-level driving in v0.1 |
 | ESP32-S3 + Pico 2 quadcopter with SNN/STDP flight control | Planned |
 
+## Models
+
+PSF Helm downloads `.gguf` model files directly and registers them with its private Ollama. The Hugging Face token (if you need one for gated models) lives in your project's `.env` file — git-ignored, mode 0600, and only sent to `huggingface.co` as Bearer auth.
+
+```bash
+# Optional: store your HF token (read from env var so it never hits shell history)
+export HF_TOKEN="hf_..."
+npm run helm -- hf-token-set --from-env HF_TOKEN
+
+# Check whether a token is configured (never echoes the value)
+npm run helm -- hf-token-status
+
+# Download a model. Helm fetches, verifies, and registers with Ollama.
+npm run helm -- model-download \
+  https://huggingface.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF/resolve/main/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf \
+  --name qwen2.5-vl-7b
+
+# Or a gated model (requires HF token + accepted Gemma TOS):
+npm run helm -- model-download \
+  https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf/resolve/main/gemma-3-4b-it-q4_0.gguf \
+  --name gemma-3-4b
+
+# List models known to Helm's private Ollama
+npm run helm -- model-list
+
+# Remove a model
+npm run helm -- model-remove qwen2.5-vl-7b
+```
+
+### Recommended starter models
+
+| Model | Size | Vision? | Gated? | URL |
+|---|---|---|---|---|
+| Qwen2.5-VL-7B-Instruct (Q4_K_M) | ~4.7 GB | Yes | No | [download](https://huggingface.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF/resolve/main/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf?download=true) |
+| Gemma 3 4B Instruct (Q4_0 QAT) | ~3 GB | Yes | Yes (HF account + TOS) | [download](https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf/resolve/main/gemma-3-4b-it-q4_0.gguf?download=true) |
+
+You can drop any `.gguf` from Hugging Face in via `model-download <url>`. The two above are the ones Helm tests against.
+
 ## Inference Backend
 
 PSF Helm runs its own private Ollama instance. It does **not** touch the system Ollama daemon (port 11434). Helm's Ollama lives on a private port (52450), uses a private models directory, and is fully isolated by four environment variables — see `core/llm/ollama/README.md`. This is a deliberate "single source of truth" design choice imported from PSF Core's experience.

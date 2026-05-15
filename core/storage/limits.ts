@@ -47,6 +47,12 @@ export const STORAGE_LIMITS = {
 
   /** Total bytes allowed under ~/.local/share/psf-helm/voice/ (binaries + models). */
   voiceAssetsBytes: 2 * 1024 * 1024 * 1024,
+
+  /** Total bytes allowed for downloaded LLM models. Default 50 GB. */
+  modelsBytes: 50 * 1024 * 1024 * 1024,
+
+  /** Total bytes allowed for in-flight downloads (staging area). Default 20 GB. */
+  modelDownloadStagingBytes: 20 * 1024 * 1024 * 1024,
 } as const;
 
 export type StorageLimitKey = keyof typeof STORAGE_LIMITS;

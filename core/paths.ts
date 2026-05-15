@@ -38,4 +38,5 @@ export const paths = {
   ollamaRoot: () => join(dataDir(), "ollama"),
   ollamaBin: () => join(dataDir(), "ollama", "bin", "ollama"),
   ollamaModels: () => join(dataDir(), "ollama", "models"),
+  modelStaging: () => join(dataDir(), "model-staging"),
 };

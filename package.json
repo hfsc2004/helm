@@ -4,16 +4,21 @@
   "description": "Drive your robot truck — or fly your drone — by telling it what to do. PSF Helm is a local-first desktop app that pairs natural-language control with any llama.cpp model, runs entirely on your machine, and stays out of the cloud.",
   "author": "Pseudo Science Fiction",
   "license": "Apache-2.0",
-  "main": "dist-electron/main.js",
+  "main": "dist-electron/electron/main.js",
   "type": "module",
+  "bin": {
+    "helm": "./dist-cli/cli/helm.js"
+  },
   "scripts": {
-    "dev": "concurrently -k -n vite,electron -c blue,magenta \"npm:dev:renderer\" \"npm:dev:main\"",
-    "dev:renderer": "vite",
-    "dev:main": "wait-on tcp:5173 && tsx watch electron/main.ts",
-    "build": "npm run build:renderer && npm run build:main",
+    "helm-ui": "concurrently -k -n vite,electron -c blue,magenta \"npm:helm-ui:renderer\" \"npm:helm-ui:main\"",
+    "helm-ui:renderer": "vite",
+    "helm-ui:main": "wait-on tcp:5173 && tsx watch electron/main.ts",
+    "helm": "tsx cli/helm.ts",
+    "build": "npm run build:renderer && npm run build:electron && npm run build:cli",
     "build:renderer": "vite build",
-    "build:main": "tsc -p electron/tsconfig.json",
-    "check": "svelte-check --tsconfig ./tsconfig.json && tsc -p electron/tsconfig.json --noEmit",
+    "build:electron": "tsc -p electron/tsconfig.json",
+    "build:cli": "tsc -p cli/tsconfig.json",
+    "check": "svelte-check --tsconfig ./tsconfig.json && tsc -p electron/tsconfig.json --noEmit && tsc -p cli/tsconfig.json --noEmit",
     "start": "electron .",
     "preview": "vite preview"
   },

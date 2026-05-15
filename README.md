@@ -46,9 +46,28 @@ Nothing in PSF Helm phones home. No analytics, no error reporting, no user track
 - A llama.cpp-compatible `.gguf` model
 - A supported vehicle on your local WiFi
 
+## Surfaces
+
+PSF Helm has two surfaces over one shared core:
+
+- **`helm-ui`** — the desktop app. What most users will use. Launch with `./start.sh` or `npm run helm-ui`.
+- **`helm`** — the CLI. Agent-first, structured output, NDJSON streams, machine-introspectable. Useful for scripting, automation, and frontier-model control. Run with `npm run helm -- <command>`.
+
+Both share `core/` for all logic — vehicles, planner, state streaming, storage. Neither owns business logic.
+
 ## Repository Layout
 
-To be defined as the project takes shape.
+```
+core/         — business logic (vehicles, llm, state, storage). No UI.
+cli/          — `helm` CLI entrypoint and commands.
+electron/     — `helm-ui` Electron main process and preload.
+src/          — `helm-ui` Svelte renderer.
+shared/       — types used by every surface.
+firmware/     — ESP32 / microcontroller sketches.
+install/      — one-time dependency installers.
+public/       — static assets.
+docs/         — design notes.
+```
 
 ## License
 

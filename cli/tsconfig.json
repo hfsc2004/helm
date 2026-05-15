@@ -12,7 +12,7 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
-    "outDir": "../dist-electron",
+    "outDir": "../dist-cli",
     "rootDir": "..",
     "baseUrl": "..",
     "paths": {
@@ -20,6 +20,6 @@
       "@core/*": ["core/*"]
     }
   },
-  "include": ["./**/*.ts", "../shared/**/*.ts", "../core/**/*.ts"],
+  "include": ["./**/*.ts", "../core/**/*.ts", "../shared/**/*.ts"],
   "exclude": ["../node_modules", "../dist", "../dist-electron", "../dist-cli"]
 }

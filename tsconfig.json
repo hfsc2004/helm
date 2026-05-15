@@ -18,9 +18,10 @@
     "baseUrl": ".",
     "paths": {
       "@shared/*": ["shared/*"],
+      "@core/*": ["core/*"],
       "@/*": ["src/*"]
     }
   },
-  "include": ["src/**/*.ts", "src/**/*.svelte", "shared/**/*.ts"],
-  "exclude": ["node_modules", "dist", "dist-electron", "electron"]
+  "include": ["src/**/*.ts", "src/**/*.svelte", "shared/**/*.ts", "core/**/*.ts"],
+  "exclude": ["node_modules", "dist", "dist-electron", "dist-cli", "electron", "cli"]
 }

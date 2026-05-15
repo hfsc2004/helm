@@ -18,6 +18,8 @@ import "./commands/voice.js";
 import "./commands/hardware.js";
 import "./commands/vehicle.js";
 import "./commands/ollama.js";
+import "./commands/hf-token.js";
+import "./commands/model.js";
 
 const USAGE = `helm <command> [args] [flags]
 

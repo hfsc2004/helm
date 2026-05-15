@@ -29,6 +29,12 @@ export interface PrivacyPosture {
     audio_transmitted: false;
     note: string;
   };
+  llm: {
+    backend: string;
+    inference_location: "local";
+    prompts_transmitted: false;
+    note: string;
+  };
 }
 
 export function buildPrivacyPosture(opts: {
@@ -78,6 +84,12 @@ export function buildPrivacyPosture(opts: {
       tts_engine: "piper (local)",
       audio_transmitted: false,
       note: "Speech is transcribed on your machine and discarded after the command is executed.",
+    },
+    llm: {
+      backend: "Helm's private Ollama (loopback only)",
+      inference_location: "local",
+      prompts_transmitted: false,
+      note: "Natural-language intents (helm drive ...) are sent only to Helm's private Ollama on 127.0.0.1. Prompts never leave your machine.",
     },
   };
 }

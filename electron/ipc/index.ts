@@ -2,6 +2,8 @@ import { ipcMain, BrowserWindow } from "electron";
 
 import { IPC } from "../../shared/ipc-channels.js";
 import type {
+  DriveRequest,
+  DriveStreamEvent,
   StateStreamEvent,
   StateStreamRequest,
   VehicleCmdRequest,
@@ -11,6 +13,7 @@ import type {
 import * as registry from "../../core/vehicles/registry.js";
 import * as adapter from "../../core/vehicles/ground-skidsteer.js";
 import * as ollamaManager from "../../core/llm/ollama/manager.js";
+import { plan, DEFAULT_PLANNER_MODEL } from "../../core/llm/planner.js";
 import {
   closeByStreamId,
   openSubscription,
@@ -127,6 +130,120 @@ export function registerIpcHandlers(opts: { version: string }): void {
   });
 
   ipcMain.handle(IPC.vehicle.streamStateClose, async (_e, streamId: string) => {
+    await closeByStreamId(streamId);
+    return { closed: true };
+  });
+
+  // ---------- vehicle drive (long-lived → BMOC session) ----------
+  ipcMain.handle(IPC.vehicle.driveOpen, async (event, req: DriveRequest) => {
+    const vehicle = registry.get(req.vehicleId);
+    if (!vehicle) {
+      throw new Error(`no vehicle ${req.vehicleId}`);
+    }
+    const senderId = `window-${event.sender.id}`;
+    let cancelled = false;
+
+    const handle = openSubscription({
+      kind: "drive",
+      consumerId: senderId,
+      metadata: { vehicleId: req.vehicleId, intent: req.intent.slice(0, 80) },
+      closer: () => {
+        cancelled = true;
+      },
+    });
+
+    const channel = IPC.vehicle.driveEventPrefix + handle.info.streamId;
+    const send = (payload: DriveStreamEvent) => {
+      if (event.sender.isDestroyed()) return;
+      event.sender.send(channel, payload);
+    };
+
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (win) {
+      win.once("closed", () => {
+        void handle.close();
+      });
+    }
+
+    // Run the lifecycle in the background; resolve the open call immediately
+    // so the renderer can start listening.
+    void (async () => {
+      try {
+        const planResult = await plan({
+          vehicle,
+          intent: req.intent,
+          model: req.model ?? DEFAULT_PLANNER_MODEL,
+          temperature: req.temperature ?? 0,
+          retryOnInvalid: !req.noRetry,
+        });
+        if (cancelled) return;
+
+        if (!planResult.ok) {
+          send({
+            streamId: handle.info.streamId,
+            event: "validate",
+            ok: false,
+            reason: planResult.reason,
+            raw: planResult.raw.slice(0, 500),
+          });
+          send({
+            streamId: handle.info.streamId,
+            event: "complete",
+            ok: false,
+            reason: planResult.reason,
+          });
+          await handle.close();
+          return;
+        }
+
+        send({
+          streamId: handle.info.streamId,
+          event: "plan",
+          command: planResult.command,
+          modelUsed: planResult.modelUsed,
+          attempts: planResult.attempts,
+        });
+        send({ streamId: handle.info.streamId, event: "validate", ok: true });
+
+        if (req.dryRun) {
+          send({
+            streamId: handle.info.streamId,
+            event: "complete",
+            ok: true,
+            dryRun: true,
+          });
+          await handle.close();
+          return;
+        }
+
+        send({
+          streamId: handle.info.streamId,
+          event: "execute",
+          command: planResult.command,
+        });
+        const ack = await adapter.sendCommand(vehicle, planResult.command);
+        if (cancelled) return;
+        send({
+          streamId: handle.info.streamId,
+          event: "complete",
+          ok: ack.ok,
+          ack,
+        });
+      } catch (err) {
+        send({
+          streamId: handle.info.streamId,
+          event: "error",
+          error: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        await handle.close();
+      }
+    })();
+
+    return handle.info;
+  });
+
+  ipcMain.handle(IPC.vehicle.driveClose, async (_e, streamId: string) => {
     await closeByStreamId(streamId);
     return { closed: true };
   });

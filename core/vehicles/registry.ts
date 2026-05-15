@@ -102,3 +102,32 @@ export function remove(id: string): boolean {
   save(file);
   return true;
 }
+
+export interface SetCameraInput {
+  baseUrl: string;
+  streamPath?: string;
+  snapshotPath?: string;
+}
+
+export function setCamera(id: string, input: SetCameraInput | null): Vehicle | null {
+  const file = load();
+  const idx = file.vehicles.findIndex((v) => v.id === id);
+  if (idx < 0) return null;
+  const vehicle = file.vehicles[idx]!;
+  if (input === null) {
+    delete vehicle.camera;
+    vehicle.capabilities = vehicle.capabilities.filter((c) => c !== "camera.mjpeg");
+  } else {
+    vehicle.camera = {
+      baseUrl: input.baseUrl,
+      streamPath: input.streamPath ?? "/stream",
+      snapshotPath: input.snapshotPath ?? "/capture",
+    };
+    if (!vehicle.capabilities.includes("camera.mjpeg")) {
+      vehicle.capabilities = [...vehicle.capabilities, "camera.mjpeg"];
+    }
+  }
+  file.vehicles[idx] = vehicle;
+  save(file);
+  return vehicle;
+}

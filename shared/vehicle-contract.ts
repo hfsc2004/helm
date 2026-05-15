@@ -37,6 +37,15 @@ export interface Vehicle {
     host: string;
     port: number;
   };
+  /** Optional camera sidecar (MJPEG / JPEG snapshot endpoints). */
+  camera?: {
+    /** e.g. "http://172.20.0.16:81" — without path. */
+    baseUrl: string;
+    /** Default "/stream". MJPEG multipart endpoint. */
+    streamPath?: string;
+    /** Default "/capture". One-shot JPEG endpoint. */
+    snapshotPath?: string;
+  };
   coordinateFrame: CoordinateFrame;
   lossOfCommsBehavior: LossOfCommsBehavior;
   addedAt: number;

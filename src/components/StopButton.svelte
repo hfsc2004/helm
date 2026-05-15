@@ -1,11 +1,13 @@
 <script lang="ts">
   import { fleet } from "../stores/vehicles";
+  import { activity } from "../stores/activity";
 
   let busy = false;
 
   async function stop() {
     if (!$fleet.selectedId) return;
     busy = true;
+    activity.push({ who: "human", kind: "stop", message: "STOP pressed" });
     try {
       await window.helm.vehicle.stop({ vehicleId: $fleet.selectedId });
     } finally {

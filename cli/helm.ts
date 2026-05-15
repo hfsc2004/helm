@@ -17,6 +17,7 @@ import "./commands/describe.js";
 import "./commands/voice.js";
 import "./commands/hardware.js";
 import "./commands/vehicle.js";
+import "./commands/vehicle-camera.js";
 import "./commands/ollama.js";
 import "./commands/hf-token.js";
 import "./commands/model.js";

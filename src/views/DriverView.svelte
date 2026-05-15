@@ -3,17 +3,18 @@
   import StopButton from "../components/StopButton.svelte";
   import Dpad from "../components/Dpad.svelte";
   import StateReadouts from "../components/StateReadouts.svelte";
+  import IntentBar from "../components/IntentBar.svelte";
+  import CameraFeed from "../components/CameraFeed.svelte";
+  import ActivityLog from "../components/ActivityLog.svelte";
 </script>
 
 <div class="layout">
   <div class="stage">
     <div class="camera">
-      <div class="camera-placeholder">
-        <div class="big">▶</div>
-        <div class="small">camera feed (vehicle has no camera capability yet)</div>
-      </div>
+      <CameraFeed />
       <StopButton />
     </div>
+    <IntentBar />
   </div>
 
   <aside class="rail">
@@ -27,6 +28,7 @@
     {:else}
       <Dpad />
       <StateReadouts />
+      <ActivityLog />
     {/if}
   </aside>
 </div>
@@ -36,6 +38,7 @@
     display: grid;
     grid-template-columns: 1fr 320px;
     overflow: hidden;
+    min-height: 0;
   }
   .stage {
     position: relative;
@@ -53,18 +56,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-  }
-  .camera-placeholder {
-    text-align: center;
-    color: var(--muted);
-  }
-  .camera-placeholder .big {
-    font-size: 3rem;
-    opacity: 0.3;
-  }
-  .camera-placeholder .small {
-    font-size: 0.8rem;
-    margin-top: 0.5rem;
+    overflow: hidden;
   }
   .rail {
     background: var(--surface);

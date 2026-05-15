@@ -21,6 +21,11 @@
       "@core/*": ["core/*"]
     }
   },
-  "include": ["./**/*.ts", "../shared/**/*.ts", "../core/**/*.ts"],
+  "include": [
+    "./**/*.ts",
+    "../shared/**/*.ts",
+    "../core/**/*.ts",
+    "../core/**/*.js"
+  ],
   "exclude": ["../node_modules", "../dist", "../dist-electron", "../dist-cli"]
 }

@@ -1,5 +1,5 @@
 <div align="center">
-  <h1>PSF Helm</h1>
+  <img src="logo.png" alt="PSF Helm" width="360">
   <p><em>The natural-language helm for your robot — or your drone.</em></p>
 </div>
 

@@ -92,6 +92,25 @@ npm run helm -- ollama-status
 npm run helm -- ollama-uninstall --confirm
 ```
 
+## Driving by intent (CLI, v0.1)
+
+Once your private Ollama is running (`helm ollama-start`) and a model is downloaded (`helm model-download <url>`), you can drive by talking to the planner:
+
+```bash
+# Default model is qwen2.5-vl-7b (recommended); override with --model
+npm run helm -- drive <vehicle-id> "go forward 2 seconds"
+npm run helm -- drive <vehicle-id> "turn left then stop"
+npm run helm -- drive <vehicle-id> "drive in a circle at half speed"
+
+# Plan only; don't actually move the robot
+npm run helm -- drive <vehicle-id> "go forward 2 seconds" --dry-run
+
+# Override model
+npm run helm -- drive <vehicle-id> "stop" --model gemma-3-4b
+```
+
+The planner emits NDJSON events (`plan`, `validate`, `execute`, `complete`) so agents can observe the full lifecycle. Invalid output gets one retry with the validator error in context; a second failure exits non-zero rather than guessing.
+
 ## Driving (CLI, v0.1)
 
 The CLI works today with the ESP32 skid-steer firmware in `firmware/ground-skidsteer/`.

@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="logo.png" alt="PSF Helm" width="360">
+  <img src="public/logo.png" alt="PSF Helm" width="360">
   <p><em>The natural-language helm for your robot — or your drone.</em></p>
 </div>
 
@@ -10,6 +10,10 @@ Cross-platform: Linux, macOS, Windows.
 ## Status
 
 Early development. Foundation phase.
+
+## What PSF Helm does NOT do
+
+Nothing in PSF Helm phones home. No analytics, no error reporting, no user tracking, no cloud accounts. Vehicle state ("telemetry" in robotics terminology) refers to data the vehicle reports about itself — battery voltage, motor speed, signal strength — and stays on your machine. If a future version ever adds any outbound network traffic of any kind, it will be opt-in and disclosed prominently. 🐤
 
 ## What It Does
 
@@ -53,3 +57,7 @@ Apache-2.0 (planned). See `LICENSE`.
 ## Family
 
 PSF Helm is part of the PSF product family alongside [PSF Core](https://github.com/hfsc2004/) and other tools. Helm is the consumer-facing driving app; the larger industrial orchestration platform lives elsewhere.
+
+---
+
+<sub>Copyright © 2026 Pseudo Science Fiction</sub>

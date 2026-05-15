@@ -7,8 +7,9 @@ pnpm-debug.log*
 .npm/
 .yarn/
 
-# Electron build output
+# Build output
 dist/
+dist-electron/
 out/
 build/
 release/
@@ -50,6 +51,7 @@ coverage/
 *.tsbuildinfo
 .cache/
 .parcel-cache/
+.svelte-kit/
 
 # Model files (large; users bring their own)
 *.gguf

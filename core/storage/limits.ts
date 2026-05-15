@@ -44,6 +44,9 @@ export const STORAGE_LIMITS = {
 
   /** NDJSON stream backpressure buffer (per subscriber). */
   streamBufferBytes: 64 * 1024,
+
+  /** Total bytes allowed under ~/.local/share/psf-helm/voice/ (binaries + models). */
+  voiceAssetsBytes: 2 * 1024 * 1024 * 1024,
 } as const;
 
 export type StorageLimitKey = keyof typeof STORAGE_LIMITS;

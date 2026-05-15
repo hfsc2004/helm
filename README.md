@@ -15,6 +15,10 @@ Early development. Foundation phase.
 
 Nothing in PSF Helm phones home. No analytics, no error reporting, no user tracking, no cloud accounts. Vehicle state ("telemetry" in robotics terminology) refers to data the vehicle reports about itself — battery voltage, motor speed, signal strength — and stays on your machine. If a future version ever adds any outbound network traffic of any kind, it will be opt-in and disclosed prominently. 🐤
 
+Voice (STT) runs locally via whisper.cpp. Your speech is never transmitted; it's transcribed on your machine and discarded after the command is executed. 🐤
+
+Voice is optional. If you choose to install it, Helm makes one-time outbound connections to GitHub to fetch the whisper.cpp and piper engine binaries. After install, no further outbound calls. Remove voice any time from Settings or with `helm voice-uninstall --confirm`. 🐤
+
 ## What It Does
 
 - Pair with a robot or drone over your local network

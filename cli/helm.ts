@@ -14,6 +14,8 @@ import { get, all } from "./registry.js";
 import "./commands/version.js";
 import "./commands/privacy.js";
 import "./commands/describe.js";
+import "./commands/voice.js";
+import "./commands/hardware.js";
 
 const USAGE = `helm <command> [args] [flags]
 

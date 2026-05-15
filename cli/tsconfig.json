@@ -12,6 +12,7 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
+    "allowJs": true,
     "outDir": "../dist-cli",
     "rootDir": "..",
     "baseUrl": "..",

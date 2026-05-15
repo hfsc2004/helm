@@ -57,3 +57,6 @@ coverage/
 *.gguf
 models/
 !models/.gitkeep
+
+# Mockups (working drafts, not part of the product)
+docs/mockups/

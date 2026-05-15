@@ -14,6 +14,12 @@ import * as registry from "../../core/vehicles/registry.js";
 import * as adapter from "../../core/vehicles/ground-skidsteer.js";
 import * as ollamaManager from "../../core/llm/ollama/manager.js";
 import { plan, DEFAULT_PLANNER_MODEL } from "../../core/llm/planner.js";
+import { listSerialPorts } from "../../core/serial/index.js";
+import {
+  detectHardware,
+  classifyForInference,
+  selectNvidiaGpu,
+} from "../../core/hardware/index.js";
 import {
   closeByStreamId,
   openSubscription,
@@ -246,6 +252,22 @@ export function registerIpcHandlers(opts: { version: string }): void {
   ipcMain.handle(IPC.vehicle.driveClose, async (_e, streamId: string) => {
     await closeByStreamId(streamId);
     return { closed: true };
+  });
+
+  // ---------- serial (one-shot) ----------
+  ipcMain.handle(IPC.serial.list, async () => {
+    return { ports: listSerialPorts() };
+  });
+
+  // ---------- hardware (one-shot) ----------
+  ipcMain.handle(IPC.hardware.detect, async () => {
+    const hw = await detectHardware(process.cwd());
+    const classification = classifyForInference(hw);
+    const nvidiaSelection =
+      classification.accelerationType === "nvidia"
+        ? selectNvidiaGpu(classification)
+        : null;
+    return { hardware: hw, classification, nvidiaSelection };
   });
 
   // ---------- ollama (one-shot) ----------

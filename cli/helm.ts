@@ -22,6 +22,7 @@ import "./commands/ollama.js";
 import "./commands/hf-token.js";
 import "./commands/model.js";
 import "./commands/drive.js";
+import "./commands/serial.js";
 
 const USAGE = `helm <command> [args] [flags]
 

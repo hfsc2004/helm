@@ -91,6 +91,38 @@ export interface StateStreamEvent {
 // Renderer-facing API surface
 // ---------------------------------------------------------------------------
 
+export interface SerialPortInfo {
+  path: string;
+  label: string;
+  kind: "usb" | "virtual" | "serial";
+  boardHint: "raspberry-pi-pico" | "esp32" | "";
+}
+
+export interface HardwareInfo {
+  hardware: {
+    ram_gb?: number;
+    cpu_count?: number;
+    gpu_detected?: boolean;
+    gpu_list?: Array<{
+      name: string;
+      vram?: number;
+      uuid?: string;
+      index?: number;
+    }>;
+    platform?: string;
+    [key: string]: unknown;
+  };
+  classification: {
+    accelerationType: string;
+    name?: string;
+    vram?: number;
+    uuid?: string;
+    index?: number;
+    displayText?: string;
+  };
+  nvidiaSelection: { index: number | null; uuid: string } | null;
+}
+
 export interface HelmAPI {
   app: {
     getVersion(): Promise<string>;
@@ -107,6 +139,12 @@ export interface HelmAPI {
       handle: StreamHandle;
       stop: () => Promise<void>;
     }>;
+  };
+  serial: {
+    list(): Promise<{ ports: SerialPortInfo[] }>;
+  };
+  hardware: {
+    detect(): Promise<HardwareInfo>;
   };
   ollama: {
     status(): Promise<OllamaStatus>;
@@ -138,6 +176,12 @@ export const IPC = {
     driveOpen: "vehicle:drive-open",
     driveClose: "vehicle:drive-close",
     driveEventPrefix: "vehicle:drive-event:",
+  },
+  serial: {
+    list: "serial:list",
+  },
+  hardware: {
+    detect: "hardware:detect",
   },
   ollama: {
     status: "ollama:status",

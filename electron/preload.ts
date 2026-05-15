@@ -18,6 +18,8 @@ const CH = {
   vehicleDriveOpen: "vehicle:drive-open",
   vehicleDriveClose: "vehicle:drive-close",
   vehicleDriveEventPrefix: "vehicle:drive-event:",
+  serialList: "serial:list",
+  hardwareDetect: "hardware:detect",
   ollamaStatus: "ollama:status",
 };
 
@@ -61,6 +63,12 @@ const api = {
         },
       };
     },
+  },
+  serial: {
+    list: () => ipcRenderer.invoke(CH.serialList),
+  },
+  hardware: {
+    detect: () => ipcRenderer.invoke(CH.hardwareDetect),
   },
   ollama: {
     status: () => ipcRenderer.invoke(CH.ollamaStatus),

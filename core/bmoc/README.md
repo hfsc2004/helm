@@ -8,6 +8,12 @@ Nothing in Helm spawns or kills its own child processes. Every subsystem that ru
 
 This is non-negotiable. The first time something bypasses BMOC, you start the next two-week orphan-process bug hunt.
 
+## Companion rule (IPC subscriptions)
+
+Long-lived IPC subscriptions (e.g., `state-stream`) are sessions too. They register with BMOC via `electron/ipc/subscriptions.ts → openSubscription(...)`, so window close and app shutdown reap them along with everything else. One-shot request/response IPC calls do **not** need session tracking — they open and close within the same call.
+
+BMOC's role is **bookkeeping**, not transport. It does not route IPC; it tracks which sessions exist, who owns them, and how to close them. No session opens without BMOC knowing about it. That's how we keep a clean house.
+
 ## What's here
 
 - `session-manager-process-utils.js` — verbatim. Cross-platform `isProcessRunning`, `killProcess`, `killProcessesOnPort`.

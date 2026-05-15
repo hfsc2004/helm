@@ -24,6 +24,7 @@ import "./commands/model.js";
 import "./commands/drive.js";
 import "./commands/serial.js";
 import "./commands/toolchain.js";
+import "./commands/flash.js";
 
 const USAGE = `helm <command> [args] [flags]
 

@@ -1,0 +1,21 @@
+{
+  "id": "ground-skidsteer-esp32",
+  "name": "Ground Skid-Steer (ESP32 + L298N)",
+  "description": "WiFi-controlled skid-steer robot with deadman timer. Targets a classic ESP32 (not S3) driving an L298N motor controller.",
+  "target": "esp32",
+  "fqbn": "esp32:esp32:esp32",
+  "core": "esp32:esp32",
+  "vehicleKind": "ground",
+  "capabilities": ["drive.skidsteer", "state.basic"],
+  "vars": [
+    { "key": "wifi.ssid",          "type": "string",  "required": true,  "label": "WiFi SSID" },
+    { "key": "wifi.password",      "type": "secret",  "required": true,  "label": "WiFi password" },
+    { "key": "wifi.useStatic",     "type": "boolean", "default": false,  "label": "Use a static IP?" },
+    { "key": "wifi.staticIp",      "type": "string",  "default": "192.168.1.50", "label": "Static IP" },
+    { "key": "wifi.staticCidr",    "type": "number",  "default": 24,     "label": "Static CIDR prefix (0–32)" },
+    { "key": "motor.leftTrim",     "type": "number",  "default": 0,      "label": "Left motor trim (-40..40)" },
+    { "key": "motor.rightTrim",    "type": "number",  "default": 0,      "label": "Right motor trim (-40..40)" },
+    { "key": "motor.invertLeft",   "type": "boolean", "default": false,  "label": "Invert left motor?" },
+    { "key": "motor.invertRight",  "type": "boolean", "default": false,  "label": "Invert right motor?" }
+  ]
+}

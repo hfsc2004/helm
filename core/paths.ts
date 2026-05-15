@@ -35,4 +35,7 @@ export const paths = {
     join(dataDir(), "history", `${vehicleId}.ndjson`),
   trace: (traceId: string) => join(dataDir(), "traces", `${traceId}.ndjson`),
   errors: () => join(dataDir(), "errors.ndjson"),
+  ollamaRoot: () => join(dataDir(), "ollama"),
+  ollamaBin: () => join(dataDir(), "ollama", "bin", "ollama"),
+  ollamaModels: () => join(dataDir(), "ollama", "models"),
 };

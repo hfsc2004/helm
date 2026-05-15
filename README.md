@@ -35,6 +35,25 @@ Early development. Foundation phase.
 | ESP32 skid-steer ground robot (HTTP/WiFi) | Wire-level driving in v0.1 |
 | ESP32-S3 + Pico 2 quadcopter with SNN/STDP flight control | Planned |
 
+## Inference Backend
+
+PSF Helm runs its own private Ollama instance. It does **not** touch the system Ollama daemon (port 11434). Helm's Ollama lives on a private port (52450), uses a private models directory, and is fully isolated by four environment variables — see `core/llm/ollama/README.md`. This is a deliberate "single source of truth" design choice imported from PSF Core's experience.
+
+```bash
+# One-time install (downloads from ollama.com)
+npm run helm -- ollama-install --confirm
+
+# Start / stop Helm's private Ollama
+npm run helm -- ollama-start
+npm run helm -- ollama-stop
+
+# Check what's running (without touching system Ollama)
+npm run helm -- ollama-status
+
+# Remove
+npm run helm -- ollama-uninstall --confirm
+```
+
 ## Driving (CLI, v0.1)
 
 The CLI works today with the ESP32 skid-steer firmware in `firmware/ground-skidsteer/`.

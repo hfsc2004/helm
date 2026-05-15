@@ -38,7 +38,7 @@ export function buildPrivacyPosture(opts: {
   return {
     canary: {
       statement:
-        "PSF Helm makes zero outbound network connections except to vehicles on the local network, and — only when the user explicitly opts in to voice — to github.com to fetch whisper.cpp + piper engine binaries during a one-time install.",
+        "PSF Helm makes zero outbound network connections except to vehicles on the local network. Two opt-in exceptions: github.com (one-time, only if the user installs voice) and ollama.com (one-time, only if the user installs Helm's private Ollama). After install in either case, no further outbound calls.",
       last_affirmed: "2026-05-15",
       version_affirmed: opts.version,
     },
@@ -48,6 +48,12 @@ export function buildPrivacyPosture(opts: {
         purpose: "voice engine install/upgrade",
         opt_in: true,
         triggered_by: "helm voice install (or the UI equivalent)",
+      },
+      {
+        host: "ollama.com",
+        purpose: "Helm's private Ollama binary install",
+        opt_in: true,
+        triggered_by: "helm ollama-install (or the UI equivalent)",
       },
     ],
     data_collected: [],

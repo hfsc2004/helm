@@ -17,6 +17,7 @@ import "./commands/describe.js";
 import "./commands/voice.js";
 import "./commands/hardware.js";
 import "./commands/vehicle.js";
+import "./commands/ollama.js";
 
 const USAGE = `helm <command> [args] [flags]
 

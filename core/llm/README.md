@@ -1,13 +1,13 @@
 # LLM
 
-llama.cpp lifecycle management and the natural-language → vehicle-command pipeline.
+Inference backend and the natural-language → vehicle-command planner.
 
-## Planned modules
+## Backend: Ollama (v0.1)
 
-- `llamacpp-manager.ts` — spawn, monitor, and shut down a local `llama-server` process
-- `planner.ts` — turn a user utterance ("go forward 2 seconds") into a validated vehicle command, given the active vehicle's capabilities and contract
-- `prompts/` — system prompts parameterized by vehicle kind
+Helm runs its own private Ollama instance. See `ollama/README.md` for the isolation contract.
 
-## Design
+The choice of Ollama (vs. raw llama.cpp) is documented as a foundation decision: prebuilt binaries, no compiler toolchain on the user's machine, single-domain outbound for install, proven Modelfile + GGUF-wrap support for the v0.2 model UX. A second backend (raw llama.cpp) is planned for a future release and will share the same `InferenceBackend` interface defined here.
 
-The planner is the app's analogue to PSF Core's IRG: model proposes, validator gates, executor runs. The vehicle's contract defines what commands are even possible to propose.
+## Planner (forthcoming)
+
+Branch 2 (`feat/llm-planner`) adds `planner.ts`: takes a vehicle + an intent string, asks the model for a structured command, validates against the vehicle's contract, returns it. The IRG pattern from PSF Core, scaled down.

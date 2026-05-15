@@ -44,7 +44,7 @@ export function buildPrivacyPosture(opts: {
   return {
     canary: {
       statement:
-        "PSF Helm makes zero outbound network connections except to vehicles on the local network. Three opt-in exceptions: github.com (one-time, only if the user installs voice), ollama.com (one-time, only if the user installs Helm's private Ollama), and huggingface.co (per-model, only when the user explicitly downloads a model). The HF token, if configured, is sent only to huggingface.co and only as Bearer auth.",
+        "PSF Helm makes zero outbound network connections except to vehicles on the local network. Four opt-in exceptions: github.com (one-time, only if the user installs voice), ollama.com (one-time, only if the user installs Helm's private Ollama), huggingface.co (per-model, only when the user explicitly downloads a model), and downloads.arduino.cc (one-time, only when the user installs the arduino-cli toolchain). The HF token, if configured, is sent only to huggingface.co and only as Bearer auth.",
       last_affirmed: "2026-05-15",
       version_affirmed: opts.version,
     },
@@ -66,6 +66,12 @@ export function buildPrivacyPosture(opts: {
         purpose: "Model download (LLM .gguf files). HF token sent only here, only as Bearer auth.",
         opt_in: true,
         triggered_by: "helm model-download <url> (or the UI equivalent)",
+      },
+      {
+        host: "downloads.arduino.cc",
+        purpose: "arduino-cli toolchain install (for ESP32/ESP32-S3 firmware compile + upload).",
+        opt_in: true,
+        triggered_by: "helm toolchain-install --target arduino-cli --confirm (or the UI equivalent)",
       },
     ],
     data_collected: [],

@@ -39,4 +39,7 @@ export const paths = {
   ollamaBin: () => join(dataDir(), "ollama", "bin", "ollama"),
   ollamaModels: () => join(dataDir(), "ollama", "models"),
   modelStaging: () => join(dataDir(), "model-staging"),
+  toolchainsRoot: () => join(dataDir(), "toolchains"),
+  arduinoCliRoot: () => join(dataDir(), "toolchains", "arduino-cli"),
+  arduinoCliBin: () => join(dataDir(), "toolchains", "arduino-cli", "arduino-cli"),
 };

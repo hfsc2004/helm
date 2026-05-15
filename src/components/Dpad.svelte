@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { fleet } from "../stores/vehicles";
+  import { activity } from "../stores/activity";
   import type { SkidSteerAction } from "@shared/vehicle-contract";
 
   const SPEED = 160;
@@ -10,18 +11,33 @@
   let busy = false;
   let lastError: string | null = null;
 
+  function summary(action: SkidSteerAction): string {
+    switch (action.kind) {
+      case "stop": return "stop";
+      case "fwd": return `fwd ${action.speed}${action.durationMs ? ` ${action.durationMs}ms` : ""}`;
+      case "rev": return `rev ${action.speed}${action.durationMs ? ` ${action.durationMs}ms` : ""}`;
+      case "turn": return `turn ${action.signed}${action.durationMs ? ` ${action.durationMs}ms` : ""}`;
+      case "tank": return `tank L${action.left} R${action.right}${action.durationMs ? ` ${action.durationMs}ms` : ""}`;
+    }
+  }
+
   async function send(action: SkidSteerAction) {
     if (!$fleet.selectedId) return;
     busy = true;
     lastError = null;
+    activity.push({ who: "human", kind: action.kind === "stop" ? "stop" : "cmd", message: summary(action) });
     try {
       const res = await window.helm.vehicle.cmd({
         vehicleId: $fleet.selectedId,
         action,
       });
-      if (!res.ok) lastError = res.error ?? "command rejected";
+      if (!res.ok) {
+        lastError = res.error ?? "command rejected";
+        activity.push({ who: "local", kind: "error", message: lastError });
+      }
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
+      activity.push({ who: "local", kind: "error", message: lastError });
     } finally {
       busy = false;
     }

@@ -15,6 +15,9 @@ const CH = {
   vehicleStreamStateOpen: "vehicle:stream-state-open",
   vehicleStreamStateClose: "vehicle:stream-state-close",
   vehicleStreamEventPrefix: "vehicle:stream-event:",
+  vehicleDriveOpen: "vehicle:drive-open",
+  vehicleDriveClose: "vehicle:drive-close",
+  vehicleDriveEventPrefix: "vehicle:drive-event:",
   ollamaStatus: "ollama:status",
 };
 
@@ -39,6 +42,22 @@ const api = {
         stop: async () => {
           ipcRenderer.removeListener(channel, listener);
           await ipcRenderer.invoke(CH.vehicleStreamStateClose, handle.streamId);
+        },
+      };
+    },
+    drive: async (req: unknown, onEvent: (e: unknown) => void) => {
+      const handle = (await ipcRenderer.invoke(CH.vehicleDriveOpen, req)) as {
+        streamId: string;
+        bmocSessionId: string;
+      };
+      const channel = CH.vehicleDriveEventPrefix + handle.streamId;
+      const listener = (_event: unknown, payload: unknown) => onEvent(payload);
+      ipcRenderer.on(channel, listener);
+      return {
+        handle,
+        stop: async () => {
+          ipcRenderer.removeListener(channel, listener);
+          await ipcRenderer.invoke(CH.vehicleDriveClose, handle.streamId);
         },
       };
     },

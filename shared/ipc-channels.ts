@@ -14,6 +14,27 @@ import type { Vehicle, SkidSteerAction } from "./vehicle-contract.js";
 import type { OllamaStatus } from "./llm.js";
 
 // ---------------------------------------------------------------------------
+// drive (long-lived, BMOC-tracked)
+// ---------------------------------------------------------------------------
+
+export interface DriveRequest {
+  vehicleId: string;
+  intent: string;
+  model?: string;
+  dryRun?: boolean;
+  noRetry?: boolean;
+  temperature?: number;
+}
+
+export type DriveStreamEvent =
+  | { streamId: string; event: "plan"; command: SkidSteerAction; modelUsed: string; attempts: number }
+  | { streamId: string; event: "validate"; ok: true }
+  | { streamId: string; event: "validate"; ok: false; reason: string; raw: string }
+  | { streamId: string; event: "execute"; command: SkidSteerAction }
+  | { streamId: string; event: "complete"; ok: boolean; ack?: unknown; reason?: string; dryRun?: boolean }
+  | { streamId: string; event: "error"; error: string };
+
+// ---------------------------------------------------------------------------
 // One-shot request/response
 // ---------------------------------------------------------------------------
 
@@ -82,6 +103,10 @@ export interface HelmAPI {
       handle: StreamHandle;
       stop: () => Promise<void>;
     }>;
+    drive(req: DriveRequest, onEvent: (e: DriveStreamEvent) => void): Promise<{
+      handle: StreamHandle;
+      stop: () => Promise<void>;
+    }>;
   };
   ollama: {
     status(): Promise<OllamaStatus>;
@@ -110,6 +135,9 @@ export const IPC = {
     streamStateClose: "vehicle:stream-state-close",
     /** Per-stream event channel template; actual channel = streamEventPrefix + streamId */
     streamEventPrefix: "vehicle:stream-event:",
+    driveOpen: "vehicle:drive-open",
+    driveClose: "vehicle:drive-close",
+    driveEventPrefix: "vehicle:drive-event:",
   },
   ollama: {
     status: "ollama:status",

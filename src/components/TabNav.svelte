@@ -3,6 +3,7 @@
 
   const tabs: Array<{ id: ViewName; label: string; icon: string }> = [
     { id: "drive", label: "Drive", icon: "▸" },
+    { id: "vehicles", label: "Vehicles", icon: "◈" },
     { id: "devices", label: "Devices", icon: "⌬" },
   ];
 

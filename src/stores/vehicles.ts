@@ -18,6 +18,16 @@ const helm = (): Window["helm"] => {
 function createFleetStore(): Writable<FleetState> & {
   refresh: () => Promise<void>;
   select: (id: string | null) => void;
+  add: (input: { name: string; host: string; port?: number }) => Promise<{
+    ok: boolean;
+    vehicle?: Vehicle;
+    error?: string;
+  }>;
+  remove: (id: string) => Promise<{ ok: boolean; error?: string }>;
+  setCamera: (
+    id: string,
+    camera: { baseUrl: string; streamPath?: string; snapshotPath?: string } | null
+  ) => Promise<{ ok: boolean; vehicle?: Vehicle; error?: string }>;
 } {
   const store = writable<FleetState>({
     vehicles: [],
@@ -48,6 +58,43 @@ function createFleetStore(): Writable<FleetState> & {
     },
     select(id) {
       store.update((s) => ({ ...s, selectedId: id }));
+    },
+    async add(input) {
+      const res = await helm().vehicle.add(input);
+      if (res.ok && res.vehicle) {
+        const vehicle = res.vehicle;
+        store.update((s) => ({
+          ...s,
+          vehicles: [...s.vehicles, vehicle],
+          selectedId: s.selectedId ?? vehicle.id,
+        }));
+        return { ok: true, vehicle };
+      }
+      return { ok: false, error: res.error };
+    },
+    async remove(id) {
+      const res = await helm().vehicle.remove({ vehicleId: id });
+      if (res.ok) {
+        store.update((s) => ({
+          ...s,
+          vehicles: s.vehicles.filter((v) => v.id !== id),
+          selectedId: s.selectedId === id ? null : s.selectedId,
+        }));
+        return { ok: true };
+      }
+      return { ok: false, error: res.error };
+    },
+    async setCamera(id, camera) {
+      const res = await helm().vehicle.setCamera({ vehicleId: id, camera });
+      if (res.ok && res.vehicle) {
+        const vehicle = res.vehicle;
+        store.update((s) => ({
+          ...s,
+          vehicles: s.vehicles.map((v) => (v.id === id ? vehicle : v)),
+        }));
+        return { ok: true, vehicle };
+      }
+      return { ok: false, error: res.error };
     },
   };
 }

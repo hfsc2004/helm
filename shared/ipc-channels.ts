@@ -123,12 +123,37 @@ export interface HardwareInfo {
   nvidiaSelection: { index: number | null; uuid: string } | null;
 }
 
+export interface VehicleAddRequest {
+  name: string;
+  host: string;
+  port?: number;
+  kind?: "ground" | "air";
+}
+
+export interface VehicleRemoveRequest {
+  vehicleId: string;
+}
+
+export interface VehicleSetCameraRequest {
+  vehicleId: string;
+  camera: { baseUrl: string; streamPath?: string; snapshotPath?: string } | null;
+}
+
+export interface VehicleMutationResponse {
+  ok: boolean;
+  vehicle?: import("./vehicle-contract.js").Vehicle | null;
+  error?: string;
+}
+
 export interface HelmAPI {
   app: {
     getVersion(): Promise<string>;
   };
   vehicle: {
     list(): Promise<VehicleListResponse>;
+    add(req: VehicleAddRequest): Promise<VehicleMutationResponse>;
+    remove(req: VehicleRemoveRequest): Promise<VehicleMutationResponse>;
+    setCamera(req: VehicleSetCameraRequest): Promise<VehicleMutationResponse>;
     cmd(req: VehicleCmdRequest): Promise<VehicleCmdResponse>;
     stop(req: VehicleStopRequest): Promise<VehicleCmdResponse>;
     streamState(req: StateStreamRequest, onEvent: (e: StateStreamEvent) => void): Promise<{
@@ -167,6 +192,9 @@ export const IPC = {
   },
   vehicle: {
     list: "vehicle:list",
+    add: "vehicle:add",
+    remove: "vehicle:remove",
+    setCamera: "vehicle:set-camera",
     cmd: "vehicle:cmd",
     stop: "vehicle:stop",
     streamStateOpen: "vehicle:stream-state-open",

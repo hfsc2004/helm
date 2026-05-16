@@ -5,6 +5,7 @@
   import StateReadouts from "../components/StateReadouts.svelte";
   import IntentBar from "../components/IntentBar.svelte";
   import CameraFeed from "../components/CameraFeed.svelte";
+  import AudioFeed from "../components/AudioFeed.svelte";
   import ActivityLog from "../components/ActivityLog.svelte";
 </script>
 
@@ -14,6 +15,7 @@
       <CameraFeed />
       <StopButton />
     </div>
+    <AudioFeed />
     <IntentBar />
   </div>
 

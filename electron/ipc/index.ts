@@ -9,6 +9,7 @@ import type {
   VehicleAddRequest,
   VehicleCmdRequest,
   VehicleRemoveRequest,
+  VehicleSetAudioRequest,
   VehicleSetCameraRequest,
   VehicleStopRequest,
 } from "../../shared/ipc-channels.js";
@@ -70,6 +71,13 @@ export function registerIpcHandlers(opts: { version: string }): void {
 
   ipcMain.handle(IPC.vehicle.setCamera, async (_e, req: VehicleSetCameraRequest) => {
     const updated = registry.setCamera(req.vehicleId, req.camera);
+    return updated
+      ? { ok: true, vehicle: updated }
+      : { ok: false, error: `no vehicle ${req.vehicleId}` };
+  });
+
+  ipcMain.handle(IPC.vehicle.setAudio, async (_e, req: VehicleSetAudioRequest) => {
+    const updated = registry.setAudio(req.vehicleId, req.audio);
     return updated
       ? { ok: true, vehicle: updated }
       : { ok: false, error: `no vehicle ${req.vehicleId}` };

@@ -17,6 +17,7 @@ export type VehicleKind = "ground" | "air";
 export type VehicleCapability =
   | "drive.skidsteer"
   | "camera.mjpeg"
+  | "audio.pcm"
   | "state.basic"
   | "fly.quad"; // future
 
@@ -45,6 +46,17 @@ export interface Vehicle {
     streamPath?: string;
     /** Default "/capture". One-shot JPEG endpoint. */
     snapshotPath?: string;
+  };
+  /**
+   * Optional audio sidecar (roving microphone — vehicle streams its own
+   * I2S mic to Helm over chunked HTTP). Audio stays on the LAN; nothing
+   * is uploaded anywhere.
+   */
+  audio?: {
+    /** e.g. "http://172.20.0.17:82" — without path. */
+    baseUrl: string;
+    /** Default "/audio". Chunked PCM (16kHz mono 16-bit) over HTTP. */
+    streamPath?: string;
   };
   coordinateFrame: CoordinateFrame;
   lossOfCommsBehavior: LossOfCommsBehavior;

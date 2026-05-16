@@ -35,6 +35,12 @@ export interface PrivacyPosture {
     prompts_transmitted: false;
     note: string;
   };
+  audio: {
+    location: "local-lan";
+    transmitted_off_lan: false;
+    persisted_to_disk: false;
+    note: string;
+  };
 }
 
 export function buildPrivacyPosture(opts: {
@@ -96,6 +102,12 @@ export function buildPrivacyPosture(opts: {
       inference_location: "local",
       prompts_transmitted: false,
       note: "Natural-language intents (helm drive ...) are sent only to Helm's private Ollama on 127.0.0.1. Prompts never leave your machine.",
+    },
+    audio: {
+      location: "local-lan",
+      transmitted_off_lan: false,
+      persisted_to_disk: false,
+      note: "When a vehicle has a roving microphone configured, Helm pulls the audio stream over your LAN and plays it locally in the UI. The audio is not transcribed, recorded, or transmitted off your network. Stop listening at any time by clicking pause.",
     },
   };
 }

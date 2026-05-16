@@ -28,6 +28,10 @@ function createFleetStore(): Writable<FleetState> & {
     id: string,
     camera: { baseUrl: string; streamPath?: string; snapshotPath?: string } | null
   ) => Promise<{ ok: boolean; vehicle?: Vehicle; error?: string }>;
+  setAudio: (
+    id: string,
+    audio: { baseUrl: string; streamPath?: string } | null
+  ) => Promise<{ ok: boolean; vehicle?: Vehicle; error?: string }>;
 } {
   const store = writable<FleetState>({
     vehicles: [],
@@ -86,6 +90,18 @@ function createFleetStore(): Writable<FleetState> & {
     },
     async setCamera(id, camera) {
       const res = await helm().vehicle.setCamera({ vehicleId: id, camera });
+      if (res.ok && res.vehicle) {
+        const vehicle = res.vehicle;
+        store.update((s) => ({
+          ...s,
+          vehicles: s.vehicles.map((v) => (v.id === id ? vehicle : v)),
+        }));
+        return { ok: true, vehicle };
+      }
+      return { ok: false, error: res.error };
+    },
+    async setAudio(id, audio) {
+      const res = await helm().vehicle.setAudio({ vehicleId: id, audio });
       if (res.ok && res.vehicle) {
         const vehicle = res.vehicle;
         store.update((s) => ({

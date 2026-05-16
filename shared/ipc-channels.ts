@@ -139,6 +139,11 @@ export interface VehicleSetCameraRequest {
   camera: { baseUrl: string; streamPath?: string; snapshotPath?: string } | null;
 }
 
+export interface VehicleSetAudioRequest {
+  vehicleId: string;
+  audio: { baseUrl: string; streamPath?: string } | null;
+}
+
 export interface VehicleMutationResponse {
   ok: boolean;
   vehicle?: import("./vehicle-contract.js").Vehicle | null;
@@ -154,6 +159,7 @@ export interface HelmAPI {
     add(req: VehicleAddRequest): Promise<VehicleMutationResponse>;
     remove(req: VehicleRemoveRequest): Promise<VehicleMutationResponse>;
     setCamera(req: VehicleSetCameraRequest): Promise<VehicleMutationResponse>;
+    setAudio(req: VehicleSetAudioRequest): Promise<VehicleMutationResponse>;
     cmd(req: VehicleCmdRequest): Promise<VehicleCmdResponse>;
     stop(req: VehicleStopRequest): Promise<VehicleCmdResponse>;
     streamState(req: StateStreamRequest, onEvent: (e: StateStreamEvent) => void): Promise<{
@@ -195,6 +201,7 @@ export const IPC = {
     add: "vehicle:add",
     remove: "vehicle:remove",
     setCamera: "vehicle:set-camera",
+    setAudio: "vehicle:set-audio",
     cmd: "vehicle:cmd",
     stop: "vehicle:stop",
     streamStateOpen: "vehicle:stream-state-open",

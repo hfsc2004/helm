@@ -131,3 +131,30 @@ export function setCamera(id: string, input: SetCameraInput | null): Vehicle | n
   save(file);
   return vehicle;
 }
+
+export interface SetAudioInput {
+  baseUrl: string;
+  streamPath?: string;
+}
+
+export function setAudio(id: string, input: SetAudioInput | null): Vehicle | null {
+  const file = load();
+  const idx = file.vehicles.findIndex((v) => v.id === id);
+  if (idx < 0) return null;
+  const vehicle = file.vehicles[idx]!;
+  if (input === null) {
+    delete vehicle.audio;
+    vehicle.capabilities = vehicle.capabilities.filter((c) => c !== "audio.pcm");
+  } else {
+    vehicle.audio = {
+      baseUrl: input.baseUrl,
+      streamPath: input.streamPath ?? "/audio",
+    };
+    if (!vehicle.capabilities.includes("audio.pcm")) {
+      vehicle.capabilities = [...vehicle.capabilities, "audio.pcm"];
+    }
+  }
+  file.vehicles[idx] = vehicle;
+  save(file);
+  return vehicle;
+}

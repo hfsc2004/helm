@@ -6,7 +6,10 @@ import type {
   DriveStreamEvent,
   StateStreamEvent,
   StateStreamRequest,
+  VehicleAddRequest,
   VehicleCmdRequest,
+  VehicleRemoveRequest,
+  VehicleSetCameraRequest,
   VehicleStopRequest,
 } from "../../shared/ipc-channels.js";
 
@@ -39,6 +42,37 @@ export function registerIpcHandlers(opts: { version: string }): void {
   // ---------- vehicle (one-shot) ----------
   ipcMain.handle(IPC.vehicle.list, async () => {
     return { vehicles: registry.list() };
+  });
+
+  ipcMain.handle(IPC.vehicle.add, async (_e, req: VehicleAddRequest) => {
+    try {
+      const v = registry.add({
+        name: req.name,
+        host: req.host,
+        port: req.port,
+        kind: req.kind,
+      });
+      return { ok: true, vehicle: v };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
+
+  ipcMain.handle(IPC.vehicle.remove, async (_e, req: VehicleRemoveRequest) => {
+    const removed = registry.remove(req.vehicleId);
+    return removed
+      ? { ok: true }
+      : { ok: false, error: `no vehicle ${req.vehicleId}` };
+  });
+
+  ipcMain.handle(IPC.vehicle.setCamera, async (_e, req: VehicleSetCameraRequest) => {
+    const updated = registry.setCamera(req.vehicleId, req.camera);
+    return updated
+      ? { ok: true, vehicle: updated }
+      : { ok: false, error: `no vehicle ${req.vehicleId}` };
   });
 
   ipcMain.handle(IPC.vehicle.cmd, async (_e, req: VehicleCmdRequest) => {

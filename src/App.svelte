@@ -1,5 +1,6 @@
 <script lang="ts">
   import DriverView from "./views/DriverView.svelte";
+  import VehiclesView from "./views/VehiclesView.svelte";
   import DevicesView from "./views/DevicesView.svelte";
   import VehiclePicker from "./components/VehiclePicker.svelte";
   import TabNav from "./components/TabNav.svelte";
@@ -25,6 +26,8 @@
   <div class="content">
     {#if $activeView === "drive"}
       <DriverView />
+    {:else if $activeView === "vehicles"}
+      <VehiclesView />
     {:else if $activeView === "devices"}
       <DevicesView />
     {/if}

@@ -10,6 +10,9 @@ import { contextBridge, ipcRenderer } from "electron";
 const CH = {
   appGetVersion: "app:get-version",
   vehicleList: "vehicle:list",
+  vehicleAdd: "vehicle:add",
+  vehicleRemove: "vehicle:remove",
+  vehicleSetCamera: "vehicle:set-camera",
   vehicleCmd: "vehicle:cmd",
   vehicleStop: "vehicle:stop",
   vehicleStreamStateOpen: "vehicle:stream-state-open",
@@ -29,6 +32,9 @@ const api = {
   },
   vehicle: {
     list: () => ipcRenderer.invoke(CH.vehicleList),
+    add: (req: unknown) => ipcRenderer.invoke(CH.vehicleAdd, req),
+    remove: (req: unknown) => ipcRenderer.invoke(CH.vehicleRemove, req),
+    setCamera: (req: unknown) => ipcRenderer.invoke(CH.vehicleSetCamera, req),
     cmd: (req: unknown) => ipcRenderer.invoke(CH.vehicleCmd, req),
     stop: (req: unknown) => ipcRenderer.invoke(CH.vehicleStop, req),
     streamState: async (req: unknown, onEvent: (e: unknown) => void) => {

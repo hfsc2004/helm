@@ -7,11 +7,15 @@
 
   let cameraDraft = vehicle.camera?.baseUrl ?? "";
   let editingCamera = false;
+  let audioDraft = vehicle.audio?.baseUrl ?? "";
+  let editingAudio = false;
   let busy = false;
   let error: string | null = null;
 
   $: hasCamera = !!vehicle.camera;
   $: cameraDraft = vehicle.camera?.baseUrl ?? "";
+  $: hasAudio = !!vehicle.audio;
+  $: audioDraft = vehicle.audio?.baseUrl ?? "";
 
   async function saveCamera() {
     const url = cameraDraft.trim();
@@ -41,6 +45,36 @@
       return;
     }
     editingCamera = false;
+  }
+
+  async function saveAudio() {
+    const url = audioDraft.trim();
+    if (!url) {
+      error = "Mic URL required.";
+      return;
+    }
+    busy = true;
+    error = null;
+    const res = await fleet.setAudio(vehicle.id, { baseUrl: url });
+    busy = false;
+    if (!res.ok) {
+      error = res.error ?? "Failed to save mic.";
+      return;
+    }
+    editingAudio = false;
+  }
+
+  async function clearAudio() {
+    if (!confirm(`Remove the mic from ${vehicle.name}?`)) return;
+    busy = true;
+    error = null;
+    const res = await fleet.setAudio(vehicle.id, null);
+    busy = false;
+    if (!res.ok) {
+      error = res.error ?? "Failed to remove mic.";
+      return;
+    }
+    editingAudio = false;
   }
 
   async function removeVehicle() {
@@ -132,12 +166,53 @@
       {/if}
     </div>
 
-    <div class="sidecar disabled" title="Coming soon">
+    <div class="sidecar">
       <div class="sidecar-line">
-        <input type="checkbox" disabled />
+        <input
+          type="checkbox"
+          checked={hasAudio}
+          on:change={(e) => {
+            if (!(e.currentTarget instanceof HTMLInputElement)) return;
+            if (e.currentTarget.checked) {
+              editingAudio = true;
+            } else {
+              void clearAudio();
+            }
+          }}
+          disabled={busy}
+        />
         <span class="sidecar-name">Mic</span>
-        <span class="sidecar-meta">— roving microphone (planned)</span>
+        {#if hasAudio && !editingAudio}
+          <span class="sidecar-meta mono">{vehicle.audio?.baseUrl}</span>
+          <button class="link" on:click={() => (editingAudio = true)}>edit</button>
+        {:else if !hasAudio && !editingAudio}
+          <span class="sidecar-meta">not configured</span>
+          <button class="link" on:click={() => (editingAudio = true)}>add</button>
+        {/if}
       </div>
+
+      {#if editingAudio}
+        <div class="editor">
+          <input
+            type="text"
+            bind:value={audioDraft}
+            placeholder="http://172.20.0.17:82"
+            disabled={busy}
+          />
+          <button class="primary-sm" on:click={saveAudio} disabled={busy}>Save</button>
+          <button
+            class="link"
+            on:click={() => {
+              editingAudio = false;
+              audioDraft = vehicle.audio?.baseUrl ?? "";
+              error = null;
+            }}
+            disabled={busy}
+          >
+            cancel
+          </button>
+        </div>
+      {/if}
     </div>
   </section>
 
@@ -234,9 +309,6 @@
     color: var(--muted);
     text-transform: uppercase;
     letter-spacing: 0.1em;
-  }
-  .sidecar.disabled {
-    opacity: 0.5;
   }
   .sidecar-line {
     display: flex;

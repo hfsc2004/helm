@@ -13,6 +13,7 @@ const CH = {
   vehicleAdd: "vehicle:add",
   vehicleRemove: "vehicle:remove",
   vehicleSetCamera: "vehicle:set-camera",
+  vehicleSetAudio: "vehicle:set-audio",
   vehicleCmd: "vehicle:cmd",
   vehicleStop: "vehicle:stop",
   vehicleStreamStateOpen: "vehicle:stream-state-open",
@@ -35,6 +36,7 @@ const api = {
     add: (req: unknown) => ipcRenderer.invoke(CH.vehicleAdd, req),
     remove: (req: unknown) => ipcRenderer.invoke(CH.vehicleRemove, req),
     setCamera: (req: unknown) => ipcRenderer.invoke(CH.vehicleSetCamera, req),
+    setAudio: (req: unknown) => ipcRenderer.invoke(CH.vehicleSetAudio, req),
     cmd: (req: unknown) => ipcRenderer.invoke(CH.vehicleCmd, req),
     stop: (req: unknown) => ipcRenderer.invoke(CH.vehicleStop, req),
     streamState: async (req: unknown, onEvent: (e: unknown) => void) => {

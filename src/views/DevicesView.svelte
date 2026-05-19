@@ -5,6 +5,8 @@
     HardwareInfo,
   } from "@shared/ipc-channels";
   import type { OllamaStatus } from "@shared/llm";
+  import { devicesScreen, openConfigure } from "../stores/devices-view";
+  import ConfigureBoardView from "./ConfigureBoardView.svelte";
 
   let ports: SerialPortInfo[] = [];
   let portsLoading = false;
@@ -78,7 +80,12 @@
       default: return "";
     }
   }
+
 </script>
+
+{#if $devicesScreen.kind === "configure"}
+  <ConfigureBoardView port={$devicesScreen.port} />
+{:else}
 
 <div class="page">
   <header class="page-header">
@@ -100,15 +107,26 @@
         <ul class="ports">
           {#each ports as p (p.path)}
             <li>
-              <div class="port-main">
-                <span class="path">{p.path}</span>
-                {#if p.boardHint}
-                  <span class="hint hint-{p.boardHint}">{boardLabel(p.boardHint)}</span>
-                {:else}
+              {#if p.boardHint}
+                <button
+                  class="port-button"
+                  type="button"
+                  on:click={() => openConfigure(p)}
+                >
+                  <div class="port-main">
+                    <span class="path">{p.path}</span>
+                    <span class="hint hint-{p.boardHint}">{boardLabel(p.boardHint)}</span>
+                    <span class="cta">Configure →</span>
+                  </div>
+                  <div class="port-meta">{p.label}</div>
+                </button>
+              {:else}
+                <div class="port-main">
+                  <span class="path">{p.path}</span>
                   <span class="kind">{p.kind}</span>
-                {/if}
-              </div>
-              <div class="port-meta">{p.label}</div>
+                </div>
+                <div class="port-meta">{p.label}</div>
+              {/if}
             </li>
           {/each}
         </ul>
@@ -207,6 +225,7 @@
     </section>
   </div>
 </div>
+{/if}
 
 <style>
   .page {
@@ -289,6 +308,46 @@
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 0.5rem 0.75rem;
+  }
+  .port-button {
+    display: block;
+    width: 100%;
+    background: none;
+    border: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    padding: 0;
+    margin: 0;
+    cursor: pointer;
+    border-radius: 4px;
+  }
+  ul.ports li:has(.port-button) {
+    padding: 0;
+    transition: border-color 120ms ease, background 120ms ease;
+  }
+  ul.ports li:has(.port-button:hover),
+  ul.ports li:has(.port-button:focus-visible) {
+    border-color: var(--accent);
+    background: var(--surface-2, #1c232c);
+  }
+  .port-button:focus-visible {
+    outline: none;
+  }
+  .port-button .port-main,
+  .port-button .port-meta {
+    padding: 0 0.75rem;
+  }
+  .port-button .port-main {
+    padding-top: 0.5rem;
+  }
+  .port-button .port-meta {
+    padding-bottom: 0.5rem;
+  }
+  .cta {
+    font-size: 0.7rem;
+    color: var(--accent, #58a6ff);
+    margin-left: auto;
   }
   .port-main {
     display: flex;

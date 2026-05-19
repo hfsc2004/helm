@@ -57,6 +57,17 @@ export interface FlashRequest {
 
 export type ProgressCallback = (event: FlashEvent) => void;
 
+/**
+ * Returned to callers so they can cancel an in-flight flash. Idempotent;
+ * calling cancel() after the flash finishes is a no-op. Killing mid-compile
+ * or mid-upload sends SIGKILL to the active arduino-cli subprocess, which
+ * resolves runCommandAsync with status=null + signal — the existing
+ * error-path code turns that into a clean `error` event.
+ */
+export interface FlashController {
+  cancel(): void;
+}
+
 function jobId(): string {
   return `flash_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -130,9 +141,30 @@ async function ensureCore(
 
 export async function flash(
   req: FlashRequest,
-  onProgress: ProgressCallback
+  onProgress: ProgressCallback,
+  /** Optional. If provided, .cancel() will be wired to kill any active
+   *  arduino-cli subprocess (compile or upload). */
+  controller?: FlashController
 ): Promise<{ ok: boolean; sketchPath?: string; reason?: string }> {
   const startedAt = Date.now();
+
+  // Track the active subprocess so cancellation can kill it. Only one runs
+  // at a time (compile, then upload), so a single slot is enough.
+  let active: { kill: () => void } | null = null;
+  let cancelled = false;
+  if (controller) {
+    controller.cancel = () => {
+      cancelled = true;
+      const target = active;
+      if (target) {
+        try {
+          target.kill();
+        } catch {
+          // already dead
+        }
+      }
+    };
+  }
 
   onProgress({ stage: "prepare", message: `loading template ${req.templateId}` });
   const tmpl = loadTemplate(req.templateId);
@@ -206,16 +238,22 @@ export async function flash(
       timeoutMs: 600000,
       onStdout: (c) => onProgress({ stage: "compile", message: "stdout", chunk: c }),
       onStderr: (c) => onProgress({ stage: "compile", message: "stderr", chunk: c }),
+      onProcess: (child) => {
+        active = { kill: () => child.kill("SIGKILL") };
+      },
     }
   );
+  active = null;
   try {
     await bmoc.closeSession(compileSession);
   } catch {
     // session may already be torn down; that's fine
   }
   if (compile.error || compile.status !== 0) {
-    const reason = compile.error ?? compile.stderr.slice(0, 400) ?? "compile failed";
-    onProgress({ stage: "error", message: "compile failed", reason });
+    const reason = cancelled
+      ? "cancelled"
+      : compile.error ?? compile.stderr.slice(0, 400) ?? "compile failed";
+    onProgress({ stage: "error", message: cancelled ? "cancelled" : "compile failed", reason });
     return { ok: false, reason };
   }
 
@@ -244,16 +282,22 @@ export async function flash(
       timeoutMs: 300000,
       onStdout: (c) => onProgress({ stage: "upload", message: "stdout", chunk: c }),
       onStderr: (c) => onProgress({ stage: "upload", message: "stderr", chunk: c }),
+      onProcess: (child) => {
+        active = { kill: () => child.kill("SIGKILL") };
+      },
     }
   );
+  active = null;
   try {
     await bmoc.closeSession(uploadSession);
   } catch {
     // ditto
   }
   if (upload.error || upload.status !== 0) {
-    const reason = upload.error ?? upload.stderr.slice(0, 400) ?? "upload failed";
-    onProgress({ stage: "error", message: "upload failed", reason });
+    const reason = cancelled
+      ? "cancelled"
+      : upload.error ?? upload.stderr.slice(0, 400) ?? "upload failed";
+    onProgress({ stage: "error", message: cancelled ? "cancelled" : "upload failed", reason });
     return { ok: false, reason };
   }
 

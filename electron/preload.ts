@@ -25,6 +25,10 @@ const CH = {
   serialList: "serial:list",
   hardwareDetect: "hardware:detect",
   ollamaStatus: "ollama:status",
+  flashListTemplates: "flash:list-templates",
+  flashStart: "flash:start",
+  flashCancel: "flash:cancel",
+  flashEventPrefix: "flash:event:",
 };
 
 const api = {
@@ -80,6 +84,25 @@ const api = {
   },
   ollama: {
     status: () => ipcRenderer.invoke(CH.ollamaStatus),
+  },
+  flash: {
+    listTemplates: () => ipcRenderer.invoke(CH.flashListTemplates),
+    start: async (req: unknown, onEvent: (e: unknown) => void) => {
+      const handle = (await ipcRenderer.invoke(CH.flashStart, req)) as {
+        streamId: string;
+        bmocSessionId: string;
+      };
+      const channel = CH.flashEventPrefix + handle.streamId;
+      const listener = (_event: unknown, payload: unknown) => onEvent(payload);
+      ipcRenderer.on(channel, listener);
+      return {
+        handle,
+        stop: async () => {
+          ipcRenderer.removeListener(channel, listener);
+          await ipcRenderer.invoke(CH.flashCancel, handle.streamId);
+        },
+      };
+    },
   },
 };
 

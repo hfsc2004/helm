@@ -10,6 +10,7 @@ pnpm-debug.log*
 # Build output
 dist/
 dist-electron/
+dist-cli/
 out/
 build/
 release/

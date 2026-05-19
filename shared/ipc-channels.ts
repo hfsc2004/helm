@@ -88,6 +88,56 @@ export interface StateStreamEvent {
 }
 
 // ---------------------------------------------------------------------------
+// flash (long-lived, BMOC-tracked)
+// ---------------------------------------------------------------------------
+
+export interface FlashStartRequest {
+  templateId: string;
+  port: string;
+  vars: Record<string, unknown>;
+  dryRun?: boolean;
+}
+
+export type FlashStreamStage =
+  | "prepare"
+  | "render"
+  | "resolve-toolchain"
+  | "core-install"
+  | "compile"
+  | "upload"
+  | "complete"
+  | "error";
+
+export interface FlashStreamEvent {
+  streamId: string;
+  stage: FlashStreamStage;
+  message: string;
+  chunk?: string;
+  ok?: boolean;
+  fqbn?: string;
+  port?: string;
+  sketchPath?: string;
+  durationMs?: number;
+  reason?: string;
+}
+
+export interface FlashTemplateSummary {
+  id: string;
+  name: string;
+  description?: string;
+  target: string;
+  fqbn: string;
+  vehicleKind?: string;
+  vars: Array<{
+    key: string;
+    type: "string" | "secret" | "number" | "boolean";
+    required?: boolean;
+    default?: string | number | boolean;
+    label?: string;
+  }>;
+}
+
+// ---------------------------------------------------------------------------
 // Renderer-facing API surface
 // ---------------------------------------------------------------------------
 
@@ -180,6 +230,13 @@ export interface HelmAPI {
   ollama: {
     status(): Promise<OllamaStatus>;
   };
+  flash: {
+    listTemplates(): Promise<{ templates: FlashTemplateSummary[] }>;
+    start(req: FlashStartRequest, onEvent: (e: FlashStreamEvent) => void): Promise<{
+      handle: StreamHandle;
+      stop: () => Promise<void>;
+    }>;
+  };
 }
 
 declare global {
@@ -220,5 +277,11 @@ export const IPC = {
   },
   ollama: {
     status: "ollama:status",
+  },
+  flash: {
+    listTemplates: "flash:list-templates",
+    start: "flash:start",
+    cancel: "flash:cancel",
+    eventPrefix: "flash:event:",
   },
 } as const;

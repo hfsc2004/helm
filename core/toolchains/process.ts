@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 
 /**
  * Generic subprocess runner used by toolchain helpers.
@@ -14,6 +14,8 @@ export interface RunOptions {
   cwd?: string;
   onStdout?: (chunk: string) => void;
   onStderr?: (chunk: string) => void;
+  /** Called once with the spawned child so callers can kill it (cancellation). */
+  onProcess?: (child: ChildProcess) => void;
 }
 
 export interface RunResult {
@@ -39,13 +41,14 @@ export function runCommandAsync(
     let stderr = "";
     let timedOut = false;
 
-    let child;
+    let child: ChildProcess;
     try {
       child = spawn(bin, args, {
         env: options.env ?? process.env,
         cwd: options.cwd,
         stdio: ["ignore", "pipe", "pipe"],
       });
+      options.onProcess?.(child);
     } catch (err) {
       resolve({
         bin,

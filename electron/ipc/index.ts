@@ -4,6 +4,9 @@ import { IPC } from "../../shared/ipc-channels.js";
 import type {
   DriveRequest,
   DriveStreamEvent,
+  FlashStartRequest,
+  FlashStreamEvent,
+  FlashTemplateSummary,
   StateStreamEvent,
   StateStreamRequest,
   VehicleAddRequest,
@@ -24,6 +27,10 @@ import {
   classifyForInference,
   selectNvidiaGpu,
 } from "../../core/hardware/index.js";
+import {
+  flash,
+  listTemplates as listFlashTemplates,
+} from "../../core/firmware-flash/index.js";
 import {
   closeByStreamId,
   openSubscription,
@@ -315,5 +322,96 @@ export function registerIpcHandlers(opts: { version: string }): void {
   // ---------- ollama (one-shot) ----------
   ipcMain.handle(IPC.ollama.status, async () => {
     return ollamaManager.status();
+  });
+
+  // ---------- flash (one-shot: list) ----------
+  ipcMain.handle(IPC.flash.listTemplates, async () => {
+    const templates: FlashTemplateSummary[] = listFlashTemplates().map((t) => ({
+      id: t.id,
+      name: t.name,
+      description: t.description,
+      target: t.target,
+      fqbn: t.fqbn,
+      vehicleKind: t.vehicleKind,
+      vars: t.vars.map((v) => ({
+        key: v.key,
+        type: v.type,
+        required: v.required,
+        default: v.default,
+        label: v.label,
+      })),
+    }));
+    return { templates };
+  });
+
+  // ---------- flash (long-lived → BMOC session) ----------
+  ipcMain.handle(IPC.flash.start, async (event, req: FlashStartRequest) => {
+    const senderId = `window-${event.sender.id}`;
+
+    // Filled in by the flash() call below. The subscription's closer pulls
+    // .cancel through this slot so closeByStreamId actually kills the
+    // arduino-cli child.
+    const controller: { cancel: () => void } = { cancel: () => undefined };
+
+    const handle = openSubscription({
+      kind: "flash",
+      consumerId: senderId,
+      metadata: {
+        templateId: req.templateId,
+        port: req.port,
+        dryRun: req.dryRun === true,
+      },
+      closer: () => {
+        controller.cancel();
+      },
+    });
+
+    const channel = IPC.flash.eventPrefix + handle.info.streamId;
+    const send = (payload: FlashStreamEvent) => {
+      if (event.sender.isDestroyed()) return;
+      event.sender.send(channel, payload);
+    };
+
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (win) {
+      win.once("closed", () => {
+        void handle.close();
+      });
+    }
+
+    // Run the flash in the background; resolve the open call immediately so
+    // the renderer can attach its listener before the first event fires.
+    void (async () => {
+      try {
+        await flash(
+          {
+            templateId: req.templateId,
+            port: req.port,
+            vars: req.vars,
+            dryRun: req.dryRun === true,
+          },
+          (ev) => {
+            send({ streamId: handle.info.streamId, ...ev });
+          },
+          controller
+        );
+      } catch (err) {
+        send({
+          streamId: handle.info.streamId,
+          stage: "error",
+          message: "flash threw",
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        await handle.close();
+      }
+    })();
+
+    return handle.info;
+  });
+
+  ipcMain.handle(IPC.flash.cancel, async (_e, streamId: string) => {
+    await closeByStreamId(streamId);
+    return { closed: true };
   });
 }

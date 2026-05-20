@@ -420,6 +420,12 @@ export function registerIpcHandlers(opts: { version: string }): void {
             port: req.port,
             vars: req.vars,
             dryRun: req.dryRun === true,
+            board: req.board,
+            fqbnOverride: req.fqbnOverride,
+            buildProperties: req.buildProperties,
+            eraseBeforeUpload: req.eraseBeforeUpload,
+            captureRuntimeSerialMs: req.captureRuntimeSerialMs,
+            monitorBaudRate: req.monitorBaudRate,
           },
           (ev) => {
             send({ streamId: handle.info.streamId, ...ev });

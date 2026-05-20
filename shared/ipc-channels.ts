@@ -104,6 +104,18 @@ export interface FlashStartRequest {
   port: string;
   vars: Record<string, unknown>;
   dryRun?: boolean;
+  /** Which board of a dual-board vehicle this flash targets (advisory). */
+  board?: BoardRole;
+  /** Override the template's FQBN. */
+  fqbnOverride?: string;
+  /** Extra --build-property KEY=VALUE pairs. */
+  buildProperties?: string[];
+  /** Pass --erase to arduino-cli upload. */
+  eraseBeforeUpload?: boolean;
+  /** Capture serial after upload (ms). */
+  captureRuntimeSerialMs?: number;
+  /** Baud rate for post-upload serial capture. */
+  monitorBaudRate?: number;
 }
 
 export type FlashStreamStage =

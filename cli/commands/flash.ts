@@ -115,6 +115,40 @@ const flashCmd: RuntimeCommand = {
         default: false,
         description: "Render the sketch but do not compile or upload.",
       },
+      {
+        name: "board",
+        kind: "string",
+        description: "Label this flash as targeting the drive or video board (advisory).",
+      },
+      {
+        name: "fqbn",
+        kind: "string",
+        description: "Override the template's FQBN (rare; per-vehicle variant).",
+      },
+      {
+        name: "build-property",
+        kind: "string",
+        description:
+          "Comma-separated KEY=VALUE arduino-cli --build-property pairs (USB-CDC etc.).",
+      },
+      {
+        name: "erase",
+        kind: "boolean",
+        default: false,
+        description: "Pass --erase to arduino-cli upload before writing.",
+      },
+      {
+        name: "capture-runtime-serial-ms",
+        kind: "number",
+        description:
+          "After a successful upload, capture serial output for N ms. Useful for ESP32-S3 first-boot output.",
+      },
+      {
+        name: "monitor-baud",
+        kind: "number",
+        default: 115200,
+        description: "Baud rate for post-upload serial capture.",
+      },
     ],
     streams: true,
     events: [
@@ -143,9 +177,32 @@ const flashCmd: RuntimeCommand = {
     }
     const vars = parseVarFlags(flags);
     const dryRun = flags["dry-run"] === true || flags["dry-run"] === "true";
+    const boardRaw = String(flags["board"] ?? "").trim().toLowerCase();
+    const board =
+      boardRaw === "drive" || boardRaw === "video" ? boardRaw : undefined;
+    const fqbnOverride = String(flags["fqbn"] ?? "").trim() || undefined;
+    const buildProps = String(flags["build-property"] ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    const eraseBeforeUpload =
+      flags["erase"] === true || flags["erase"] === "true";
+    const captureMs = Number(flags["capture-runtime-serial-ms"] ?? 0);
+    const baud = Number(flags["monitor-baud"] ?? 115200);
 
     const result = await flash(
-      { port, templateId, vars, dryRun },
+      {
+        port,
+        templateId,
+        vars,
+        dryRun,
+        board,
+        fqbnOverride,
+        buildProperties: buildProps.length > 0 ? buildProps : undefined,
+        eraseBeforeUpload,
+        captureRuntimeSerialMs: Number.isFinite(captureMs) && captureMs > 0 ? captureMs : undefined,
+        monitorBaudRate: Number.isFinite(baud) ? baud : undefined,
+      },
       (event) => emit(event)
     );
     return result.ok ? 0 : 1;

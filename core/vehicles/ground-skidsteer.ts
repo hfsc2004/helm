@@ -173,7 +173,20 @@ async function httpGet(
     controller.abort();
   }, timeoutMs);
   try {
-    const res = await fetch(url, { method: "GET", signal: controller.signal });
+    // Force a fresh TCP connection per request and tell the firmware to
+    // close it immediately. ESP32's WebServer library only has room for a
+    // few concurrent sockets and gets wedged when keep-alive idle ones
+    // pile up. We pay a 3-way-handshake per request as a result, but the
+    // firmware stays responsive.
+    const res = await fetch(url, {
+      method: "GET",
+      signal: controller.signal,
+      headers: { Connection: "close" },
+      // Node-only: disable keep-alive via undici. The renderer Fetch API
+      // ignores `keepalive: false` (it's a different field there), so the
+      // header above is what actually matters in both environments.
+      keepalive: false,
+    });
     const body = await res.text();
     return { status: res.status, body };
   } catch (err) {

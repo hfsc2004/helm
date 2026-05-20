@@ -1,12 +1,39 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import type {
     SerialPortInfo,
     HardwareInfo,
   } from "@shared/ipc-channels";
   import type { OllamaStatus } from "@shared/llm";
   import { devicesScreen, openConfigure } from "../stores/devices-view";
+  import { INPUT_MODE_LABELS, inputMode, type InputMode } from "../stores/inputMode";
   import ConfigureBoardView from "./ConfigureBoardView.svelte";
+
+  // Gamepad detection — polled while the Devices tab is open so the status
+  // reflects "plug in now" without forcing the user to switch views.
+  let detectedGamepad: { index: number; id: string } | null = null;
+  let gamepadFrame: number | null = null;
+
+  function pollGamepad(): void {
+    const pads =
+      typeof navigator !== "undefined" && navigator.getGamepads
+        ? navigator.getGamepads()
+        : [];
+    let found: { index: number; id: string } | null = null;
+    for (const p of pads) {
+      if (p && p.connected) {
+        found = { index: p.index, id: p.id };
+        break;
+      }
+    }
+    if (
+      (found && (!detectedGamepad || detectedGamepad.index !== found.index)) ||
+      (!found && detectedGamepad)
+    ) {
+      detectedGamepad = found;
+    }
+    gamepadFrame = requestAnimationFrame(pollGamepad);
+  }
 
   let ports: SerialPortInfo[] = [];
   let portsLoading = false;
@@ -63,7 +90,20 @@
     void refreshOllama();
   }
 
-  onMount(refreshAll);
+  onMount(() => {
+    refreshAll();
+    gamepadFrame = requestAnimationFrame(pollGamepad);
+  });
+
+  onDestroy(() => {
+    if (gamepadFrame !== null) cancelAnimationFrame(gamepadFrame);
+  });
+
+  function onInputModeChange(e: Event): void {
+    const select = e.currentTarget;
+    if (!(select instanceof HTMLSelectElement)) return;
+    inputMode.set(select.value as InputMode);
+  }
 
   function fmtBytes(b: number | undefined): string {
     if (b === undefined || b === 0) return "0";
@@ -94,6 +134,46 @@
   </header>
 
   <div class="grid">
+    <!-- Driver input -->
+    <section>
+      <h3>Driver input</h3>
+      <label class="input-mode">
+        <span class="lbl">Drive vehicles with</span>
+        <select value={$inputMode} on:change={onInputModeChange}>
+          {#each Object.entries(INPUT_MODE_LABELS) as [value, label] (value)}
+            <option {value}>{label}</option>
+          {/each}
+        </select>
+      </label>
+      {#if $inputMode === "wasd"}
+        <p class="muted small">
+          W/A/S/D for cardinals, Q/E/Z/C for diagonals (all hold-drive).
+          R = CW 180°, X = stop.
+        </p>
+      {:else if $inputMode === "numpad"}
+        <p class="muted small">
+          Numpad 8/4/2/6 (& 7/9/1/3) hold-drive. 5 = CW 180°, 0 = stop.
+          Digit row 0–9 works too.
+        </p>
+      {:else if $inputMode === "gamepad"}
+        <p class="muted small">
+          Left stick drives (tank mix). South button (A / X) = stop,
+          North button (Y / △) = CW 180°.
+        </p>
+        {#if detectedGamepad}
+          <p class="ok small">
+            <span class="dot ok"></span>
+            Connected — <code>{detectedGamepad.id}</code>
+          </p>
+        {:else}
+          <p class="muted small">
+            <span class="dot"></span>
+            No controller detected. Plug one in and press any button to wake it.
+          </p>
+        {/if}
+      {/if}
+    </section>
+
     <!-- Serial / USB -->
     <section>
       <h3>USB / Serial</h3>
@@ -428,6 +508,46 @@
     margin: 0.75rem 0 0 0;
     font-size: 0.75rem;
     color: var(--muted);
+  }
+  .input-mode {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    margin-bottom: 0.6rem;
+  }
+  .input-mode .lbl {
+    font-size: 0.75rem;
+    color: var(--muted);
+  }
+  .input-mode select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    padding: 0.45rem 0.6rem;
+    border-radius: 5px;
+    font: inherit;
+    font-size: 0.85rem;
+  }
+  .input-mode select:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .ok {
+    color: var(--good, #3fb950);
+    margin: 0.3rem 0 0 0;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--muted, #8b949e);
+  }
+  .dot.ok {
+    background: var(--good, #3fb950);
   }
   code {
     background: var(--bg);

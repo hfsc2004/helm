@@ -23,6 +23,10 @@
   let imgError = false;
   let errorMessage: string | null = null;
   let lastCapturedAt = 0;
+  // Only show the error overlay when poll failures persist — a single
+  // dropped frame is normal and shouldn't paint text across the image.
+  let consecutiveErrors = 0;
+  const ERROR_OVERLAY_THRESHOLD = 4; // ~250ms at the 66ms poll cadence
 
   $: selected = $fleet.vehicles.find((v) => v.id === $fleet.selectedId) ?? null;
   $: hasCamera = !!selected?.camera;
@@ -43,6 +47,7 @@
   async function openStream(vehicleId: string): Promise<void> {
     imgError = false;
     errorMessage = null;
+    consecutiveErrors = 0;
     try {
       const handle = await window.helm.vehicle.cameraStreamOpen({ vehicleId });
       consumerId = handle.consumerId;
@@ -53,9 +58,24 @@
       await pollOnce(FIRST_FRAME_TIMEOUT_MS);
       pollTimer = setInterval(() => void pollOnce(2000), POLL_INTERVAL_MS);
     } catch (err) {
-      imgError = true;
-      errorMessage = err instanceof Error ? err.message : String(err);
+      registerError(err instanceof Error ? err.message : String(err));
       await teardown();
+    }
+  }
+
+  function registerError(msg: string): void {
+    consecutiveErrors++;
+    if (consecutiveErrors >= ERROR_OVERLAY_THRESHOLD) {
+      imgError = true;
+      errorMessage = msg;
+    }
+  }
+
+  function clearError(): void {
+    if (consecutiveErrors > 0 || imgError) {
+      consecutiveErrors = 0;
+      imgError = false;
+      errorMessage = null;
     }
   }
 
@@ -67,8 +87,7 @@
         timeoutMs,
       });
       if (!res.ok || !res.base64) {
-        imgError = true;
-        errorMessage = res.error ?? "no frame";
+        registerError(res.error ?? "no frame");
         return;
       }
       // Skip if this is the same frame we already showed.
@@ -82,11 +101,9 @@
       currentObjectUrl = url;
       if (imgEl) imgEl.src = url;
       if (previous) URL.revokeObjectURL(previous);
-      imgError = false;
-      errorMessage = null;
+      clearError();
     } catch (err) {
-      imgError = true;
-      errorMessage = err instanceof Error ? err.message : String(err);
+      registerError(err instanceof Error ? err.message : String(err));
     }
   }
 

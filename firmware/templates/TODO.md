@@ -54,33 +54,14 @@ Likely vars (from reading the source — needs verification):
 
 Same FQBN/core as the truck.
 
-### `esp32s3-camera-elegoo` — ESP32_CameraServer_AP_2023_V1.3.ino
+### ~~`esp32s3-camera-elegoo`~~ — superseded by `video-esp32-s3`
 
-**Difficulty: hard (~1-2 hours).** This one has real wrinkles.
+The vendor sketch in `firmware/raw-from-core-ce/ESP32-S3-WROOM-1-Camera/` was Elegoo-specific (AP-mode, proprietary HTML control panel, vendor `app_httpd.cpp`). Rather than convert that wholesale, we wrote a clean PSF-original STA-mode streamer at `firmware/templates/video-esp32-s3/` that targets the three endpoints Helm actually consumes (`/stream`, `/capture`, `/health`) and ships with three swappable pin profiles (`ai_thinker_s3`, `esp32s3_eye`, `elegoo_s3`).
 
-The Elegoo ESP32-S3-Camera-V1.0 board's MJPEG / snapshot / health firmware. Used as the camera sidecar that the truck (and the eventual drone) report through.
+Still open from the original analysis (not blockers for the dual-board work, but worth tracking):
 
-Hardware-specific notes (from the existing `docs/elegoo_esp32s3_camera_relay_instructions.md`):
-- FQBN must include `:PSRAM=opi,FlashMode=qio,FlashSize=8M,USBMode=hwcdc,CDCOnBoot=cdc,PartitionScheme=default_8MB`
-- Requires the cloned `esp32-camera` library (NOT shipped with arduino-esp32 3.3.7)
-- GPIO46 power-cycle dance before `esp_camera_init()` or you get `0x106 ESP_ERR_NOT_SUPPORTED`
-- `server.send_P()` must be used for binary frames (not `server.send()` + `client.write()`)
-
-**Real wrinkles for templating:**
-
-1. **External library dependency.** This sketch needs `https://github.com/espressif/esp32-camera` cloned and passed to `arduino-cli compile --libraries <path>`. Our `template.json` schema does not yet model `requiredLibs` or `requiredClonedLibs`. **This is a real schema extension, not just a templating exercise.** Two paths:
-   - Add `requiredClonedLibs: [{repo, refOrTag, localPath}]` to `template.json`. The flash flow `git clone`s the repo into `<dataDir>/firmware-libs/` on first use, then passes `--libraries` to arduino-cli.
-   - Or: commit the `esp32-camera` library into `firmware/libs/esp32-camera/` (~10MB) and reference it locally. Simpler at the cost of repo size.
-2. **Many decisions on what's a var.** WiFi creds yes. Static IP yes. AP mode vs STA yes. JPEG quality probably (10-30 range). Frame size probably (FRAMESIZE_SVGA default). The OV3660 pin map should be **baked-in** — it's hardware, not user choice.
-3. **The pre-compiled .bin is in raw-from-core-ce.** That's a known-good image. Question for later: do we offer a "flash this prebuilt .bin instead of compile-from-source" path? Saves the user from arduino-cli + esp32-camera library setup if they just want a working camera. Different flash backend (esptool not arduino-cli).
-
-Likely vars (initial guess, needs verification):
-- `wifi.ssid` (secret, required)
-- `wifi.password` (secret, required)
-- `wifi.useStatic` (boolean)
-- `wifi.staticIp` (string)
-- `camera.jpegQuality` (number, default 10, range 4-63)
-- `camera.frameSize` (string enum: SVGA / VGA / QVGA / HD)
+- **External library dependency.** `esp_camera.h` ships with the arduino-esp32 3.3.7 core for S3 targets, so for now `--libraries` is not needed. If a future template needs a cloned library, extend `template.json` with `requiredClonedLibs: [{repo, refOrTag, localPath}]` and have the flash flow `git clone` into `<dataDir>/firmware-libs/` on first use.
+- **Pre-built .bin path.** The .bin in `firmware/raw-from-core-ce/` is a known-good Elegoo image. Offering "flash this prebuilt .bin instead of compile-from-source" would need an `esptool`-based backend, which we don't have yet.
 
 ## Other things to settle before this list is done
 

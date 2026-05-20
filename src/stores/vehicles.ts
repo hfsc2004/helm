@@ -197,6 +197,10 @@ function createStateStore() {
   });
 
   let activeStop: (() => Promise<void>) | null = null;
+  // Track what was running before a pause so resume() can restore it
+  // without the caller needing to remember the vehicle id.
+  let pausedVehicleId: string | null = null;
+  let pauseDepth = 0;
 
   async function start(vehicleId: string) {
     await stop();
@@ -223,10 +227,44 @@ function createStateStore() {
     store.set({ vehicleId: null, latest: null, reachable: null });
   }
 
+  /**
+   * Temporarily stop the upstream telemetry poll while a drive command is
+   * active — the drive board is single-threaded HTTP and gets bogged down
+   * when /cmd and /telemetry compete. Reference-counted so overlapping
+   * holds don't tear each other's pauses apart.
+   */
+  async function pause() {
+    pauseDepth++;
+    if (pauseDepth > 1) return;
+    if (activeStop) {
+      const id = (await new Promise<string | null>((resolve) =>
+        store.subscribe((s) => resolve(s.vehicleId))()
+      ));
+      pausedVehicleId = id;
+      const fn = activeStop;
+      activeStop = null;
+      await fn();
+    }
+  }
+
+  async function resume() {
+    if (pauseDepth > 0) pauseDepth--;
+    if (pauseDepth > 0) return;
+    if (pausedVehicleId && !activeStop) {
+      const id = pausedVehicleId;
+      pausedVehicleId = null;
+      await start(id);
+    } else {
+      pausedVehicleId = null;
+    }
+  }
+
   return {
     subscribe: store.subscribe,
     start,
     stop,
+    pause,
+    resume,
   };
 }
 

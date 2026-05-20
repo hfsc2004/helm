@@ -166,11 +166,31 @@ async function httpGet(
   opts: RequestOptions = {}
 ): Promise<{ status: number; body: string }> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), opts.timeoutMs ?? 5000);
+  const timeoutMs = opts.timeoutMs ?? 5000;
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   try {
     const res = await fetch(url, { method: "GET", signal: controller.signal });
     const body = await res.text();
     return { status: res.status, body };
+  } catch (err) {
+    // Translate Node's raw "This operation was aborted" into something a
+    // user can actually act on. Show host:port and the timeout.
+    if (timedOut) {
+      const host = (() => {
+        try {
+          const u = new URL(url);
+          return `${u.hostname}:${u.port || "80"}`;
+        } catch {
+          return url;
+        }
+      })();
+      throw new Error(`drive board did not respond within ${timeoutMs}ms (${host})`);
+    }
+    throw err;
   } finally {
     clearTimeout(timeout);
   }

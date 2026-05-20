@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { get } from "svelte/store";
-  import { fleet } from "../stores/vehicles";
+  import { fleet, vehicleState } from "../stores/vehicles";
   import { activity } from "../stores/activity";
   import { driveSpeed } from "../stores/driveSpeed";
   import type { SkidSteerAction } from "@shared/vehicle-contract";
@@ -80,8 +80,17 @@
     }
   }
 
-  async function send(action: SkidSteerAction, log: boolean = true): Promise<void> {
-    if (!$fleet.selectedId) return;
+  // If the drive board stops responding mid-hold, bail out of the pulse
+  // loop after this many consecutive failures and tell the user instead
+  // of hammering the wedged firmware.
+  const HOLD_FAIL_BUDGET = 3;
+  let consecutiveHoldFails = 0;
+
+  async function send(
+    action: SkidSteerAction,
+    log: boolean = true
+  ): Promise<{ ok: boolean }> {
+    if (!$fleet.selectedId) return { ok: false };
     if (log) {
       activity.push({
         who: "human",
@@ -98,12 +107,14 @@
       if (!res.ok) {
         lastError = res.error ?? "command rejected";
         activity.push({ who: "local", kind: "error", message: lastError });
-      } else {
-        lastError = null;
+        return { ok: false };
       }
+      lastError = null;
+      return { ok: true };
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
       activity.push({ who: "local", kind: "error", message: lastError });
+      return { ok: false };
     } finally {
       busy = false;
     }
@@ -112,33 +123,64 @@
   function startDrive(direction: Direction): void {
     if (!$fleet.selectedId) return;
     if (activeDirection === direction) return;
+    const wasIdle = activeDirection === null;
     if (activeDirection && activeDirection !== direction) {
       // Switching directions mid-hold: drop the old pulse and start fresh.
       stopPulse();
     }
     activeDirection = direction;
+    consecutiveHoldFails = 0;
     activity.push({
       who: "human",
       kind: "cmd",
       message: `hold ${direction}`,
     });
+    // Pause telemetry while the hold is active so /telemetry doesn't compete
+    // with /cmd for the drive board's single HTTP server slot. Only do this
+    // on the transition from idle->hold; mid-hold direction swaps already
+    // have telemetry paused.
+    if (wasIdle) void vehicleState.pause();
     // First pulse goes out immediately; subsequent pulses keep the deadman alive.
-    void send(actionFor(direction), false);
+    void pulse();
     pulseTimer = setInterval(() => {
       if (!activeDirection) {
         stopPulse();
         return;
       }
-      void send(actionFor(activeDirection), false);
+      void pulse();
     }, HOLD_PULSE_MS);
   }
 
+  async function pulse(): Promise<void> {
+    if (!activeDirection) return;
+    const res = await send(actionFor(activeDirection), false);
+    if (res.ok) {
+      consecutiveHoldFails = 0;
+      return;
+    }
+    consecutiveHoldFails++;
+    if (consecutiveHoldFails >= HOLD_FAIL_BUDGET) {
+      const dir = activeDirection;
+      activity.push({
+        who: "local",
+        kind: "error",
+        message: `hold ${dir} aborted — drive board not responding (${consecutiveHoldFails} consecutive failures)`,
+      });
+      stopPulse();
+      // Best-effort stop in case the board comes back mid-recovery.
+      void send({ kind: "stop" }, false);
+    }
+  }
+
   function stopPulse(): void {
+    const wasActive = activeDirection !== null;
     if (pulseTimer) {
       clearInterval(pulseTimer);
       pulseTimer = null;
     }
     activeDirection = null;
+    // Resume telemetry now that the hold is over.
+    if (wasActive) void vehicleState.resume();
   }
 
   function releaseDrive(): void {

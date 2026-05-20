@@ -202,7 +202,7 @@ function createStateStore() {
     await stop();
     store.set({ vehicleId, latest: null, reachable: null });
     const sub = await helm().vehicle.streamState(
-      { vehicleId, intervalMs: 500 },
+      { vehicleId, intervalMs: 2000 },
       (event) => {
         store.update((s) => ({
           ...s,

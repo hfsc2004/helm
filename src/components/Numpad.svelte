@@ -30,7 +30,12 @@
 
   export let mode: "wasd" | "numpad" = "wasd";
 
-  const HOLD_PULSE_MS = 180;       // matches core-ce; keeps the firmware deadman alive
+  // Hold-drive re-pulse cadence. Firmware deadman is 800ms, so 250ms gives
+  // 3x headroom while leaving enough HTTP capacity for telemetry polls
+  // (2000ms) and command acks. core-ce uses 180ms; we backed off after
+  // empirical RTT measurements showed the drive board's WebServer loop
+  // bogging down at 5+ Hz.
+  const HOLD_PULSE_MS = 250;
   const CW_180_MS = 820;           // core-ce ESP32_NUMPAD_CW_180_MS
 
   type Direction = "forward" | "reverse" | "left" | "right";

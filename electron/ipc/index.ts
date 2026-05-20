@@ -272,7 +272,11 @@ export function registerIpcHandlers(opts: { version: string }): void {
     if (!vehicle) {
       throw new Error(`no vehicle ${req.vehicleId}`);
     }
-    const intervalMs = Math.max(100, req.intervalMs ?? 500);
+    // Default 2000ms. The drive board is a single-threaded ESP32 — at the
+    // old 500ms cadence, telemetry polls competed with /cmd hold-drive
+    // pulses (180–250ms) for the firmware's HTTP loop and pushed round-trip
+    // times into hundreds of ms. The state readout doesn't need >0.5Hz.
+    const intervalMs = Math.max(100, req.intervalMs ?? 2000);
     const senderId = `window-${event.sender.id}`;
 
     let timer: ReturnType<typeof setInterval> | null = null;

@@ -12,12 +12,19 @@ Cross-platform target: Linux, macOS, Windows. Linux x64 is what currently works 
 Working end-to-end on Linux x64:
 
 - ✅ Drive an ESP32 skid-steer truck over WiFi (CLI and UI)
+- ✅ **Dual-board vehicles**: separate drive ESP32 + ESP32-S3 camera-and-video board, each with its own IP, Wi-Fi credentials, static-IP block, and flash params — mirrors the PSF Core Relay "Gateway Card" shape
+- ✅ **Configure-and-flash from the UI**: click a detected board → pick a template → fill in Wi-Fi / camera params → flash with live arduino-cli output
+- ✅ **Drive-tuning panel** per vehicle: action map (rotate intents 90/180° without re-flashing), swap-sides, invert-left/right
+- ✅ **Three input devices** for driving: Keyboard WASD (with QEZC diagonals), Keyboard NumPad (8/4/2/6 + 7/9/1/3), or Game Controller (left-stick tank mix); pick from the Devices tab
+- ✅ **Drive-speed slider** on the Drive view with +/- step buttons and keyboard shortcuts; live during a held drive
 - ✅ Plan commands from natural language via a local LLM (Ollama, isolated)
 - ✅ Download HF models with HF-token support, register them with Ollama
 - ✅ Detect USB/serial devices (Pi Pico, Pico 2, ESP32, ESP32-S3) and host GPUs
 - ✅ Manage the arduino-cli + mpremote toolchains
-- ✅ Compile + upload sketch templates with strict variable validation
-- 🚧 In progress: UI for the flashing flow, Pico/mpremote flash backend, voice install/runtime, packaging, macOS/Windows ports
+- ✅ Compile + upload sketch templates with strict variable validation (ground-skidsteer ESP32 + ESP32-S3 video camera)
+- ✅ MJPEG camera sidecar — vehicle's S3 streams `/stream` / `/capture` / `/health` directly to the Drive view; nothing transits the cloud
+- ✅ Roving microphone sidecar — vehicle audio over chunked HTTP, played host-side
+- 🚧 In progress: Pico/mpremote flash backend, voice install/runtime, native gamepad button remap, packaging, macOS/Windows ports
 
 ## Quick start
 
@@ -37,16 +44,18 @@ npm run helm -- version
 
 PSF Helm exposes the same logic two ways:
 
-- **`helm-ui`** — Electron desktop app. Two tabs: **Drive** (camera, STOP, intent bar, D-pad, live state, activity log) and **Devices** (USB/serial enumeration, GPU info, Ollama status). Launch with `./start.sh` or `npm run helm-ui`.
-- **`helm`** — CLI. Agent-first: structured JSON output by default, NDJSON event streams, distinct exit codes, `helm describe` emits the full command schema for introspection. Run with `npm run helm -- <command>`.
+- **`helm-ui`** — Electron desktop app. Three tabs: **Drive** (camera, STOP, intent bar, input pad, speed slider, live state, activity log), **Vehicles** (per-vehicle cards with drive-tuning panel and sidecar config), and **Devices** (driver-input picker, USB/serial enumeration, GPU info, Ollama status). Launch with `./start.sh` or `npm run helm-ui`.
+- **`helm`** — CLI. Agent-first: structured JSON output by default, NDJSON event streams, distinct exit codes, `helm describe` emits the full command schema for introspection. Every UI control has a matching CLI command. Run with `npm run helm -- <command>`.
 
 Both surfaces consume `core/` — neither owns business logic.
 
 ## End-to-end: drive a truck by talking to it
 
 ```bash
-# 1. Register the truck (ESP32 firmware in firmware/ground-skidsteer/, on your WiFi)
+# 1. Register the truck — drive ESP32 at .15, ESP32-S3 camera board at .16
 npm run helm -- vehicle-add 172.20.0.15 --name truck-01
+ID=$(npm run helm -- vehicle-list | jq -r '.vehicles[0].id')
+npm run helm -- vehicle-camera-set $ID http://172.20.0.16:81
 
 # 2. Install + start Helm's private Ollama (port 52450, isolated from any system Ollama)
 npm run helm -- ollama-install --confirm
@@ -69,7 +78,7 @@ npm run helm -- stop truck-01
 npm run helm -- state truck-01 --follow
 ```
 
-Or do all of that from the desktop app.
+Or do all of that from the desktop app — Add Vehicle includes an optional "Video board (ESP32-S3)" section that wires the camera at create time.
 
 ## What lives where
 
@@ -91,12 +100,21 @@ core/
   secrets.ts        .env-backed token store (mode 0600)
 
 cli/                helm CLI: commands as registered modules
+                    (vehicle, vehicle-drive, vehicle-wifi, vehicle-flash-config,
+                    vehicle-camera, vehicle-audio, flash, drive, state, ...)
 electron/           Electron main process + preload + IPC handlers
-src/                Svelte renderer (Driver view, Devices view, components, stores)
+src/                Svelte renderer
+  components/       Numpad, Gamepad, SpeedSlider, CameraFeed, AudioFeed,
+                    VehicleCard, AddVehicleDialog, IntentBar, ActivityLog, ...
+  views/            DriverView, VehiclesView, DevicesView, ConfigureBoardView
+  stores/           fleet, inputMode, driveSpeed, activity, devicesScreen, view
 shared/             types used by every surface (vehicle contract, IPC channels, llm)
 firmware/           ESP32 / microcontroller sketches
-  ground-skidsteer/ truck firmware (current)
+  ground-skidsteer/ drive-board firmware (current)
   templates/        templated sketches with {{var}} placeholders
+    ground-skidsteer-esp32/  drive ESP32 + L298N
+    video-esp32-s3/          ESP32-S3 camera streamer (3 pin profiles:
+                             esp32s3_eye / ai_thinker_s3 / elegoo_s3)
   raw-from-core-ce/ unconverted PSF Core sketches awaiting templatization
 install/            one-time dependency installers
 public/             static assets (logo, etc.)
@@ -105,24 +123,44 @@ docs/               design notes, conversion-todo, mockups
 
 Each non-trivial subsystem has its own `README.md` documenting its rules and design.
 
+## Drive view
+
+The Drive tab is what you use day-to-day:
+
+- **Camera** — live MJPEG from the ESP32-S3 video board; nothing transits the cloud.
+- **STOP** — always-visible; firmware-side deadman (800 ms) backs it up.
+- **Input pad** — Numpad-style 3×3 grid that doubles as touch/click buttons. The keyboard half is gated by the input mode you picked in the Devices tab:
+  - **Keyboard WASD** — W/A/S/D for cardinals, Q/E/Z/C for diagonals (all hold-drive). R = CW 180°. X = stop.
+  - **Keyboard NumPad** — 8/4/2/6 for cardinals, 7/9/1/3 for diagonals. 5 = CW 180°. 0 = stop. Digit row 0–9 works too for laptops.
+  - **Game Controller** — left stick (tank-mix, with deadzone). South button (A on Xbox / X on PS) = stop. North button (Y / △) = CW 180°.
+- **Speed slider** — sets the PWM ceiling for fwd/rev/turn and the gamepad stick. `+`/`−` step by 10 (`=`/`-` keys, or the numpad `+`/`-`). Click the track or drag the thumb. Each vehicle seeds from its saved tuning so it starts at "its" speed.
+- **Vehicle state** — left/right motor PWM, deadman age, Wi-Fi RSSI.
+- **Activity log** — every intent, every wire-level command, every reject.
+
+## Vehicles tab
+
+Per-vehicle cards. Each one shows endpoint, capabilities, and sidecars (camera / mic) with inline add/edit. Expand **Drive tuning** for the action map (rotate intents 90/180° to match a rotated chassis without re-flashing), the default speed, swap-sides, and invert-left/right. A `customized` badge appears when the vehicle has any tuning saved.
+
 ## Devices tab
 
 Bench surface for inspecting and configuring hardware:
 
-- **USB / Serial** — live list of attached microcontrollers with friendly board hints (Raspberry Pi Pico, ESP32, etc.)
-- **Inference hardware** — detected GPUs with the headless-first NVIDIA selection (a P4 dedicated to inference wins over an M5000 driving the desktop, automatically)
-- **LLM backend** — private Ollama install state, port, models dir, disk used
+- **Driver input** — pick Keyboard WASD / Keyboard NumPad / Game Controller. Saved across restarts via localStorage. Gamepad detection is live while the tab is open.
+- **USB / Serial** — live list of attached microcontrollers with friendly board hints (Raspberry Pi Pico, ESP32, etc.). Click a detected board to open the **Configure Board** screen: template picker → board-type override (ESP32 drive / ESP32-S3 video / Pi Pico) → Wi-Fi + camera params → live flash output. Per-board flash params (FQBN override, `--build-property` for USB-CDC and pin profile, erase-before-upload, post-upload serial capture) are all exposed; the ESP32-S3 video template offers three pin profiles out of the box (`esp32s3_eye` / `ai_thinker_s3` / `elegoo_s3`).
+- **Inference hardware** — detected GPUs with the headless-first NVIDIA selection (a P4 dedicated to inference wins over an M5000 driving the desktop, automatically).
+- **LLM backend** — private Ollama install state, port, models dir, disk used.
 
-The next iteration adds a **"Program…"** button per detected board, opening a template picker + variable form + live flash progress. The CLI surface for that already works:
+The flash flow is also driveable from the CLI:
 
 ```bash
 npm run helm -- toolchain-status              # what's available (arduino-cli, mpremote)
 npm run helm -- flash-templates               # what we can program
-npm run helm -- flash-render --template ground-skidsteer-esp32 \
-  --var "wifi.ssid=MyNet,wifi.password=secret"  # render only; inspect
-npm run helm -- flash /dev/ttyUSB0 \
-  --template ground-skidsteer-esp32 \
-  --var "wifi.ssid=MyNet,wifi.password=secret"  # full compile + upload
+npm run helm -- flash-render --template video-esp32-s3 \
+  --var "wifi.ssid=MyNet,wifi.password=secret,camera.pinProfile=elegoo_s3"
+npm run helm -- flash /dev/ttyACM0 \
+  --template video-esp32-s3 \
+  --var "wifi.ssid=MyNet,wifi.password=secret,wifi.staticIp=172.20.0.16" \
+  --board video --erase --capture-runtime-serial-ms 20000
 ```
 
 ## Bring your own model
@@ -141,8 +179,10 @@ Both are vision-capable (the agent will eventually be able to see the camera fee
 | Vehicle | Status |
 |---|---|
 | ESP32 skid-steer ground robot (HTTP/WiFi) | Driving end-to-end |
+| ESP32-S3 camera sidecar (PSF-original streamer; 3 pin profiles) | Flash-ready, live MJPEG into Drive view |
+| Dual-board truck (drive ESP32 + ESP32-S3 video, separate IPs) | Driving end-to-end |
+| Roving microphone sidecar | Vehicle streams I2S mic to host, host-side playback |
 | ESP32 obstacle-avoidance autonomous variants | Sketches imported, not yet templated |
-| Elegoo ESP32-S3 camera sidecar | Sketch imported, not yet templated (license review pending) |
 | ESP32-S3 + Pico 2 quadcopter (with SNN/STDP flight control) | Planned |
 
 ## Design principles
@@ -167,10 +207,6 @@ Both are vision-capable (the agent will eventually be able to see the camera fee
 ## License
 
 Apache-2.0 (planned). See `LICENSE`.
-
-## Family
-
-PSF Helm is part of the PSF product family alongside [PSF Core](https://github.com/hfsc2004/) and other tools. Helm is the consumer-facing driving app; the larger industrial orchestration platform lives elsewhere.
 
 ## What PSF Helm does NOT do
 

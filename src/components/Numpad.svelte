@@ -4,19 +4,29 @@
   import { activity } from "../stores/activity";
   import type { SkidSteerAction } from "@shared/vehicle-contract";
 
-  // Layout & semantics mirror core-ce's Gateway Card Numpad, plus a WASD/QEZC
-  // alternative for keyboards without a numpad:
+  // Layout & semantics mirror core-ce's Gateway Card Numpad.
   //
-  //   Numpad 8 / Digit 8 / W          = hold forward
-  //   Numpad 2 / Digit 2 / S          = hold reverse
-  //   Numpad 4 / Digit 4 / A          = hold left
-  //   Numpad 7 / Digit 7 / Q          = hold left
-  //   Numpad 1 / Digit 1 / Z          = hold left
-  //   Numpad 6 / Digit 6 / D          = hold right
-  //   Numpad 9 / Digit 9 / E          = hold right
-  //   Numpad 3 / Digit 3 / C          = hold right
-  //   Numpad 5 / Digit 5 / R          = press once → timed right turn (CW 180°)
-  //   Numpad 0 / Digit 0 / X          = stop
+  // Two keyboard-input modes (selected from the Devices tab):
+  //
+  //   mode = "numpad"
+  //     Numpad 8 / Digit 8           = hold forward
+  //     Numpad 2 / Digit 2           = hold reverse
+  //     Numpad 4 / 7 / 1 / Digit 4-7-1 = hold left
+  //     Numpad 6 / 9 / 3 / Digit 6-9-3 = hold right
+  //     Numpad 5 / Digit 5           = press → CW 180°
+  //     Numpad 0 / Digit 0           = stop
+  //
+  //   mode = "wasd"
+  //     W       = hold forward
+  //     S       = hold reverse
+  //     A / Q / Z = hold left
+  //     D / E / C = hold right
+  //     R       = press → CW 180°
+  //     X       = stop
+  //
+  // Pointer buttons in the grid work in both modes (touch / click fallback).
+
+  export let mode: "wasd" | "numpad" = "wasd";
 
   const HOLD_PULSE_MS = 180;       // matches core-ce; keeps the firmware deadman alive
   const CW_180_MS = 820;           // core-ce ESP32_NUMPAD_CW_180_MS
@@ -148,13 +158,17 @@
 
   // ---------------- keyboard ----------------
 
-  /** Returns a canonical "Numpad<N>" code for numpad keys, digit-row keys,
-   *  and WASD/QEZC/R/X letters — so users on laptops without a numpad still
-   *  get full hold-drive controls. */
+  /** Canonicalize a KeyboardEvent.code into a "Numpad<N>" code, but only
+   *  for keys belonging to the active input mode. Keys outside the active
+   *  family return null so they don't drive the truck. */
   function toNumpadCode(e: KeyboardEvent): string | null {
     const c = e.code;
-    if (/^Numpad[0-9]$/.test(c)) return c;
-    if (/^Digit[0-9]$/.test(c)) return "Numpad" + c.replace("Digit", "");
+    if (mode === "numpad") {
+      if (/^Numpad[0-9]$/.test(c)) return c;
+      if (/^Digit[0-9]$/.test(c)) return "Numpad" + c.replace("Digit", "");
+      return null;
+    }
+    // mode === "wasd"
     switch (c) {
       case "KeyW": return "Numpad8";
       case "KeyA": return "Numpad4";
@@ -254,8 +268,14 @@
 
 <section>
   <h3>
-    Numpad
-    <span class="aux">WASD/QEZC or numpad · R = CW 180 · X = stop</span>
+    {mode === "wasd" ? "Keyboard WASD" : "Keyboard NumPad"}
+    <span class="aux">
+      {#if mode === "wasd"}
+        WASD/QEZC · R = CW 180 · X = stop
+      {:else}
+        Numpad 8/2/4/6 (& 7/9/1/3) · 5 = CW 180 · 0 = stop
+      {/if}
+    </span>
   </h3>
 
   <div class="grid" class:busy>

@@ -1,7 +1,9 @@
 <script lang="ts">
   import { fleet } from "../stores/vehicles";
+  import { inputMode } from "../stores/inputMode";
   import StopButton from "../components/StopButton.svelte";
   import Numpad from "../components/Numpad.svelte";
+  import Gamepad from "../components/Gamepad.svelte";
   import StateReadouts from "../components/StateReadouts.svelte";
   import IntentBar from "../components/IntentBar.svelte";
   import CameraFeed from "../components/CameraFeed.svelte";
@@ -28,7 +30,11 @@
         </p>
       </section>
     {:else}
-      <Numpad />
+      {#if $inputMode === "gamepad"}
+        <Gamepad />
+      {:else}
+        <Numpad mode={$inputMode} />
+      {/if}
       <StateReadouts />
       <ActivityLog />
     {/if}

@@ -66,6 +66,39 @@ export interface VehicleStopRequest {
 }
 
 // ---------------------------------------------------------------------------
+// Camera stream cache (one upstream connection per vehicle, shared by every
+// consumer in this Helm process — renderer, CLI snapshot, future planner).
+// ---------------------------------------------------------------------------
+
+export interface VehicleCameraStreamOpenRequest {
+  vehicleId: string;
+}
+
+export interface VehicleCameraStreamHandle {
+  /** Opaque token tying this consumer to a BMOC-tracked session in main. */
+  consumerId: string;
+  vehicleId: string;
+}
+
+export interface VehicleCameraSnapshotRequest {
+  vehicleId: string;
+  /** Wait up to this long for the first cached frame. Default 8000. */
+  timeoutMs?: number;
+}
+
+export interface VehicleCameraSnapshotResponse {
+  ok: boolean;
+  /** Base64-encoded JPEG bytes. */
+  base64?: string;
+  bytes?: number;
+  contentType?: string;
+  capturedAt?: number;
+  /** "cache" when served from the live stream; "direct" when fetched from /capture. */
+  source?: "cache" | "direct";
+  error?: string;
+}
+
+// ---------------------------------------------------------------------------
 // Streams (long-lived, BMOC-tracked)
 // ---------------------------------------------------------------------------
 
@@ -252,6 +285,9 @@ export interface HelmAPI {
     setDrive(req: VehicleSetDriveRequest): Promise<VehicleMutationResponse>;
     setWifi(req: VehicleSetWifiRequest): Promise<VehicleMutationResponse>;
     setFlashConfig(req: VehicleSetFlashConfigRequest): Promise<VehicleMutationResponse>;
+    cameraStreamOpen(req: VehicleCameraStreamOpenRequest): Promise<VehicleCameraStreamHandle>;
+    cameraStreamClose(consumerId: string): Promise<void>;
+    cameraSnapshot(req: VehicleCameraSnapshotRequest): Promise<VehicleCameraSnapshotResponse>;
     cmd(req: VehicleCmdRequest): Promise<VehicleCmdResponse>;
     stop(req: VehicleStopRequest): Promise<VehicleCmdResponse>;
     streamState(req: StateStreamRequest, onEvent: (e: StateStreamEvent) => void): Promise<{
@@ -304,6 +340,9 @@ export const IPC = {
     setDrive: "vehicle:set-drive",
     setWifi: "vehicle:set-wifi",
     setFlashConfig: "vehicle:set-flash-config",
+    cameraStreamOpen: "vehicle:camera-stream-open",
+    cameraStreamClose: "vehicle:camera-stream-close",
+    cameraSnapshot: "vehicle:camera-snapshot",
     cmd: "vehicle:cmd",
     stop: "vehicle:stop",
     streamStateOpen: "vehicle:stream-state-open",

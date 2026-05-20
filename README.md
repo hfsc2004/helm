@@ -23,6 +23,8 @@ Working end-to-end on Linux x64:
 - ✅ Manage the arduino-cli + mpremote toolchains
 - ✅ Compile + upload sketch templates with strict variable validation (ground-skidsteer ESP32 + ESP32-S3 video camera)
 - ✅ MJPEG camera sidecar — vehicle's S3 streams `/stream` / `/capture` / `/health` directly to the Drive view; nothing transits the cloud
+- ✅ Shared camera-stream cache — one upstream connection per vehicle; the live UI and `helm vehicle-snapshot` see the same frames. Works around single-threaded ESP32 camera firmwares (which can only serve one HTTP client at a time)
+- ✅ Loopback control plane on 127.0.0.1 — running Helm-UI exposes a token-authed local-only HTTP surface so the standalone `helm` CLI (and, eventually, an LLM agent) can siphon frames out of the live cache without fighting the camera for a connection
 - ✅ Roving microphone sidecar — vehicle audio over chunked HTTP, played host-side
 - 🚧 In progress: Pico/mpremote flash backend, voice install/runtime, native gamepad button remap, packaging, macOS/Windows ports
 
@@ -137,6 +139,37 @@ The Drive tab is what you use day-to-day:
 - **Vehicle state** — left/right motor PWM, deadman age, Wi-Fi RSSI.
 - **Activity log** — every intent, every wire-level command, every reject.
 
+## Let an LLM see what the robot sees
+
+`helm vehicle-snapshot <id>` pulls one JPEG frame from the camera. When Helm-UI is running, the standalone CLI snaps via the loopback control plane so **the live UI and the CLI share the same upstream connection to the camera** — the ESP32-S3 camera firmware only accepts one HTTP client at a time, so this is the only way to drive *and* observe simultaneously.
+
+```bash
+# Write a JPEG to disk (default).
+npm run helm -- vehicle-snapshot truck-01
+# → emits { ok, path, bytes, contentType, source: "cache"|"direct", capturedAt }
+
+# Or capture to a specific path.
+npm run helm -- vehicle-snapshot truck-01 --out /tmp/frame.jpg
+
+# Or get the bytes back as base64 for an agent-style consumer (LLM, pipeline).
+npm run helm -- vehicle-snapshot truck-01 --base64
+
+# Or pipe raw JPEG bytes to stdout (for shell composition).
+npm run helm -- vehicle-snapshot truck-01 --stdout > frame.jpg
+
+# Force the direct /capture path (bypasses the running UI's cache).
+npm run helm -- vehicle-snapshot truck-01 --no-bridge
+```
+
+The `source` field tells you where the frame came from:
+
+| `source`  | Meaning |
+|---|---|
+| `cache`   | Pulled from the live MJPEG stream the UI is holding open. Fastest; same frame the UI sees. |
+| `direct`  | The UI wasn't running, so the CLI hit the camera's `/capture` directly. |
+
+The whole pipeline is local: the camera lives on your LAN, the cache lives in your Helm-UI process, the bridge between processes is loopback-only (`127.0.0.1`, bearer-token auth, descriptor in `<dataDir>/control-plane.json` mode `0600`). Nothing transits the cloud — including the bytes a frontier model sees when it asks for a snapshot.
+
 ## Vehicles tab
 
 Per-vehicle cards. Each one shows endpoint, capabilities, and sidecars (camera / mic) with inline add/edit. Expand **Drive tuning** for the action map (rotate intents 90/180° to match a rotated chassis without re-flashing), the default speed, swap-sides, and invert-left/right. A `customized` badge appears when the vehicle has any tuning saved.
@@ -224,6 +257,8 @@ Helm makes outbound network connections only to opt-in destinations, only when y
 | `downloads.arduino.cc` | arduino-cli toolchain install | `helm toolchain-install --target arduino-cli --confirm` |
 
 If a future version ever adds any other outbound network traffic, it will be opt-in and documented prominently. 🐤
+
+Helm does also bind one **loopback-only** listener: when Helm-UI is running, it exposes a tiny HTTP control plane on `127.0.0.1` (ephemeral port, bearer-token authenticated, descriptor written to `<dataDir>/control-plane.json` mode `0600`). This is how the standalone `helm` CLI shares the camera cache with the live UI. Nothing on the LAN can reach it; nothing leaves your machine.
 
 ---
 

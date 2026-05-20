@@ -42,4 +42,5 @@ export const paths = {
   toolchainsRoot: () => join(dataDir(), "toolchains"),
   arduinoCliRoot: () => join(dataDir(), "toolchains", "arduino-cli"),
   arduinoCliBin: () => join(dataDir(), "toolchains", "arduino-cli", "arduino-cli"),
+  controlPlane: () => join(dataDir(), "control-plane.json"),
 };

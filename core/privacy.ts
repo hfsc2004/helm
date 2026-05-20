@@ -41,6 +41,13 @@ export interface PrivacyPosture {
     persisted_to_disk: false;
     note: string;
   };
+  /** Loopback servers Helm binds locally so its own surfaces can talk to each other. */
+  local_listeners: Array<{
+    host: string;
+    purpose: string;
+    bound_to: "127.0.0.1";
+    auth: string;
+  }>;
 }
 
 export function buildPrivacyPosture(opts: {
@@ -109,5 +116,14 @@ export function buildPrivacyPosture(opts: {
       persisted_to_disk: false,
       note: "When a vehicle has a roving microphone configured, Helm pulls the audio stream over your LAN and plays it locally in the UI. The audio is not transcribed, recorded, or transmitted off your network. Stop listening at any time by clicking pause.",
     },
+    local_listeners: [
+      {
+        host: "127.0.0.1",
+        purpose:
+          "Helm-UI control plane. Lets the standalone `helm` CLI talk to a running Helm-UI so cross-process consumers (CLI snapshot, future planner) share one upstream connection to the camera firmware. Bound to loopback only — never the LAN.",
+        bound_to: "127.0.0.1",
+        auth: "Bearer token written to <dataDir>/control-plane.json (mode 0600).",
+      },
+    ],
   };
 }

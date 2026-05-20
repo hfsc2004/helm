@@ -139,6 +139,37 @@ The Drive tab is what you use day-to-day:
 - **Vehicle state** — left/right motor PWM, deadman age, Wi-Fi RSSI.
 - **Activity log** — every intent, every wire-level command, every reject.
 
+## Let an LLM see what the robot sees
+
+`helm vehicle-snapshot <id>` pulls one JPEG frame from the camera. When Helm-UI is running, the standalone CLI snaps via the loopback control plane so **the live UI and the CLI share the same upstream connection to the camera** — the ESP32-S3 camera firmware only accepts one HTTP client at a time, so this is the only way to drive *and* observe simultaneously.
+
+```bash
+# Write a JPEG to disk (default).
+npm run helm -- vehicle-snapshot truck-01
+# → emits { ok, path, bytes, contentType, source: "cache"|"direct", capturedAt }
+
+# Or capture to a specific path.
+npm run helm -- vehicle-snapshot truck-01 --out /tmp/frame.jpg
+
+# Or get the bytes back as base64 for an agent-style consumer (LLM, pipeline).
+npm run helm -- vehicle-snapshot truck-01 --base64
+
+# Or pipe raw JPEG bytes to stdout (for shell composition).
+npm run helm -- vehicle-snapshot truck-01 --stdout > frame.jpg
+
+# Force the direct /capture path (bypasses the running UI's cache).
+npm run helm -- vehicle-snapshot truck-01 --no-bridge
+```
+
+The `source` field tells you where the frame came from:
+
+| `source`  | Meaning |
+|---|---|
+| `cache`   | Pulled from the live MJPEG stream the UI is holding open. Fastest; same frame the UI sees. |
+| `direct`  | The UI wasn't running, so the CLI hit the camera's `/capture` directly. |
+
+The whole pipeline is local: the camera lives on your LAN, the cache lives in your Helm-UI process, the bridge between processes is loopback-only (`127.0.0.1`, bearer-token auth, descriptor in `<dataDir>/control-plane.json` mode `0600`). Nothing transits the cloud — including the bytes a frontier model sees when it asks for a snapshot.
+
 ## Vehicles tab
 
 Per-vehicle cards. Each one shows endpoint, capabilities, and sidecars (camera / mic) with inline add/edit. Expand **Drive tuning** for the action map (rotate intents 90/180° to match a rotated chassis without re-flashing), the default speed, swap-sides, and invert-left/right. A `customized` badge appears when the vehicle has any tuning saved.

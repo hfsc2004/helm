@@ -208,12 +208,40 @@ export async function getState(
   return parseJson<StateResponse>(body);
 }
 
+/**
+ * Hard rotation override for chassis whose firmware is wired 90° clockwise
+ * from the driver's intent (i.e. pressing "forward" makes it go right).
+ * Rotates every intent 90° counter-clockwise before sending.
+ * TODO: remove once the firmware's motor pins are re-labeled.
+ */
+function rotate90CCW(action: SkidSteerAction): SkidSteerAction {
+  const dur = "durationMs" in action ? action.durationMs : undefined;
+  switch (action.kind) {
+    case "stop":
+      return action;
+    case "fwd":
+      // forward intent -> turn left
+      return { kind: "turn", signed: -Math.abs(action.speed), durationMs: dur };
+    case "rev":
+      // reverse intent -> turn right
+      return { kind: "turn", signed: Math.abs(action.speed), durationMs: dur };
+    case "turn":
+      // left intent (signed<0) -> reverse; right intent (signed>=0) -> forward
+      return action.signed < 0
+        ? { kind: "rev", speed: Math.abs(action.signed), durationMs: dur }
+        : { kind: "fwd", speed: Math.abs(action.signed), durationMs: dur };
+    case "tank":
+      return action;
+  }
+}
+
 export async function sendCommand(
   vehicle: Vehicle,
   action: SkidSteerAction,
   opts: RequestOptions = {}
 ): Promise<CommandAck> {
-  const effective = applyDriveTuning(action, vehicle.drive);
+  const rotated = rotate90CCW(action);
+  const effective = applyDriveTuning(rotated, vehicle.drive);
   const url = `${baseUrl(vehicle)}${buildPath(effective)}`;
   const { status, body } = await httpGet(url, opts);
   if (status < 200 || status >= 300) {

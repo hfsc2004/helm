@@ -5,19 +5,30 @@ import { emit, log } from "../output.js";
 import { register, type RuntimeCommand } from "../registry.js";
 import { COMMON_EXIT_CODES } from "../../core/schema.js";
 import * as registry from "../../core/vehicles/registry.js";
+import * as cp from "../../core/control-plane/client.js";
 
 /**
  * Pull a single JPEG snapshot from a vehicle's camera sidecar.
  *
- * Hits the camera's /capture endpoint directly. NOTE: most ESP32-S3 camera
- * firmwares (esp32-camera, Elegoo) are single-threaded HTTP — if the
- * Helm-UI Drive view is open holding the /stream connection, /capture
- * will time out until the stream client disconnects. The right way to
- * snapshot while the UI is live is via the Electron IPC bridge
- * (`window.helm.vehicle.cameraSnapshot`), which siphons frames out of the
- * shared cache. The CLI is a standalone process and can't reach that
- * cache, so it falls back to /capture — works fine when Helm-UI is
- * closed.
+ * Two paths:
+ *
+ * 1. If a Helm-UI process is running, its loopback control plane is
+ *    advertised in <dataDir>/control-plane.json. We GET
+ *    /v1/vehicles/<id>/snapshot from it — the UI's main process already
+ *    has the one upstream connection to the camera open, and serves us
+ *    a frame out of its shared cache. Both the live UI and this CLI see
+ *    the same camera, on the same single connection. The response header
+ *    `x-helm-snapshot-source` is "cache" when it came from a live MJPEG
+ *    stream, "direct" when the main process had to issue its own
+ *    /capture (no stream was open).
+ *
+ * 2. Otherwise — Helm-UI isn't running — we hit the camera's /capture
+ *    endpoint directly. Same behavior as before the control plane.
+ *
+ * NOTE: most ESP32-S3 camera firmwares are single-threaded HTTP. Option (2)
+ * will block while a /stream client is active on the same camera. Option
+ * (1) doesn't have that problem because everything goes through the one
+ * connection the main process holds.
  *
  * Default: writes the JPEG to `<cwd>/<slug>-<iso-timestamp>.jpg` and emits a
  * structured handle on stdout so an agent gets a path + size + content-type
@@ -27,6 +38,7 @@ import * as registry from "../../core/vehicles/registry.js";
  *   --out <path>   write the JPEG to a specific path
  *   --base64       emit { base64, bytes, contentType } instead of writing
  *   --stdout       pipe the raw JPEG bytes to stdout, no JSON wrapping
+ *   --no-bridge    skip the control plane; always hit /capture directly
  */
 
 function slugify(name: string): string {
@@ -88,6 +100,13 @@ const vehicleSnapshot: RuntimeCommand = {
         default: 5000,
         description: "HTTP timeout for the snapshot fetch.",
       },
+      {
+        name: "no-bridge",
+        kind: "boolean",
+        default: false,
+        description:
+          "Skip the running Helm-UI's loopback control plane; always hit /capture directly.",
+      },
     ],
     streams: false,
     events: [],
@@ -124,36 +143,55 @@ const vehicleSnapshot: RuntimeCommand = {
     const timeoutMs = Math.max(100, Number(flags["timeout-ms"] ?? 5000));
     const wantStdout = flags["stdout"] === true || flags["stdout"] === "true";
     const wantBase64 = flags["base64"] === true || flags["base64"] === "true";
+    const skipBridge = flags["no-bridge"] === true || flags["no-bridge"] === "true";
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
     let bytes: Buffer;
     let contentType: string;
-    let httpStatus: number;
-    try {
-      const res = await fetch(url, { method: "GET", signal: controller.signal });
-      httpStatus = res.status;
-      if (res.status < 200 || res.status >= 300) {
+    let source: "cache" | "direct" = "direct";
+
+    // Prefer the running Helm-UI's loopback control plane if it answers.
+    const bridgeDesc = skipBridge ? null : await cp.probe(500);
+
+    if (bridgeDesc) {
+      try {
+        const remote = await cp.snapshot(bridgeDesc, vehicle.id, timeoutMs);
+        bytes = remote.bytes;
+        contentType = remote.contentType;
+        source = remote.source;
+      } catch (err) {
         emit({
           ok: false,
-          error: `Camera returned HTTP ${res.status} at ${url}`,
-          httpStatus,
-          url,
+          error: `control plane snapshot failed: ${err instanceof Error ? err.message : String(err)}`,
         });
         return 2;
       }
-      contentType = res.headers.get("content-type") ?? "application/octet-stream";
-      const arrayBuf = await res.arrayBuffer();
-      bytes = Buffer.from(arrayBuf);
-    } catch (err) {
-      emit({
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
-        url,
-      });
-      return 2;
-    } finally {
-      clearTimeout(timer);
+    } else {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, { method: "GET", signal: controller.signal });
+        if (res.status < 200 || res.status >= 300) {
+          emit({
+            ok: false,
+            error: `Camera returned HTTP ${res.status} at ${url}`,
+            httpStatus: res.status,
+            url,
+          });
+          return 2;
+        }
+        contentType = res.headers.get("content-type") ?? "application/octet-stream";
+        const arrayBuf = await res.arrayBuffer();
+        bytes = Buffer.from(arrayBuf);
+      } catch (err) {
+        emit({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+          url,
+        });
+        return 2;
+      } finally {
+        clearTimeout(timer);
+      }
     }
 
     if (wantStdout) {
@@ -161,7 +199,7 @@ const vehicleSnapshot: RuntimeCommand = {
       // redirecting stdout still sees what happened.
       process.stdout.write(bytes);
       log(
-        `vehicle-snapshot: ${bytes.length} bytes (${contentType}) from ${url}`
+        `vehicle-snapshot: ${bytes.length} bytes (${contentType}, source=${source})`
       );
       return 0;
     }
@@ -175,6 +213,7 @@ const vehicleSnapshot: RuntimeCommand = {
         bytes: bytes.length,
         contentType,
         capturedAt: isoNow(),
+        source,
         base64: bytes.toString("base64"),
       });
       return 0;
@@ -209,6 +248,7 @@ const vehicleSnapshot: RuntimeCommand = {
       bytes: bytes.length,
       contentType,
       capturedAt: isoNow(),
+      source,
     });
     return 0;
   },

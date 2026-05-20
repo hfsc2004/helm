@@ -23,6 +23,8 @@ Working end-to-end on Linux x64:
 - ✅ Manage the arduino-cli + mpremote toolchains
 - ✅ Compile + upload sketch templates with strict variable validation (ground-skidsteer ESP32 + ESP32-S3 video camera)
 - ✅ MJPEG camera sidecar — vehicle's S3 streams `/stream` / `/capture` / `/health` directly to the Drive view; nothing transits the cloud
+- ✅ Shared camera-stream cache — one upstream connection per vehicle; the live UI and `helm vehicle-snapshot` see the same frames. Works around single-threaded ESP32 camera firmwares (which can only serve one HTTP client at a time)
+- ✅ Loopback control plane on 127.0.0.1 — running Helm-UI exposes a token-authed local-only HTTP surface so the standalone `helm` CLI (and, eventually, an LLM agent) can siphon frames out of the live cache without fighting the camera for a connection
 - ✅ Roving microphone sidecar — vehicle audio over chunked HTTP, played host-side
 - 🚧 In progress: Pico/mpremote flash backend, voice install/runtime, native gamepad button remap, packaging, macOS/Windows ports
 
@@ -224,6 +226,8 @@ Helm makes outbound network connections only to opt-in destinations, only when y
 | `downloads.arduino.cc` | arduino-cli toolchain install | `helm toolchain-install --target arduino-cli --confirm` |
 
 If a future version ever adds any other outbound network traffic, it will be opt-in and documented prominently. 🐤
+
+Helm does also bind one **loopback-only** listener: when Helm-UI is running, it exposes a tiny HTTP control plane on `127.0.0.1` (ephemeral port, bearer-token authenticated, descriptor written to `<dataDir>/control-plane.json` mode `0600`). This is how the standalone `helm` CLI shares the camera cache with the live UI. Nothing on the LAN can reach it; nothing leaves your machine.
 
 ---
 

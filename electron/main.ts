@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import * as bmoc from "../core/bmoc/index.js";
+import * as controlPlane from "../core/control-plane/server.js";
 import { registerIpcHandlers } from "./ipc/index.js";
 
 const isDev = !app.isPackaged;
@@ -51,10 +52,27 @@ function createWindow(): void {
   });
 }
 
-void app.whenReady().then(() => {
+void app.whenReady().then(async () => {
   // Initialize BMOC first so anything spawned/registered later goes through it.
   bmoc.initialize(__dirname);
   registerIpcHandlers({ version: readVersion() });
+
+  // Local control plane: bound to 127.0.0.1 only. Lets the standalone
+  // `helm` CLI talk to this Helm-UI instance so cross-process consumers
+  // (CLI snapshot, future planner calls) share the same camera cache.
+  // Failure to start is non-fatal — the UI still works without it.
+  try {
+    const desc = await controlPlane.start();
+    // eslint-disable-next-line no-console
+    console.log(`[helm] control plane listening on 127.0.0.1:${desc.port}`);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[helm] control plane failed to start:",
+      err instanceof Error ? err.message : err
+    );
+  }
+
   createWindow();
 
   app.on("activate", () => {
@@ -66,6 +84,11 @@ app.on("before-quit", async (event) => {
   // Reap every BMOC-tracked session (subscriptions, child processes) before
   // the process exits.
   event.preventDefault();
+  try {
+    await controlPlane.stop();
+  } catch {
+    // best-effort
+  }
   try {
     await bmoc.closeAllSessions();
   } catch {

@@ -1,4 +1,6 @@
 import type {
+  DriveMapTarget,
+  DriveTuning,
   SkidSteerAction,
   Vehicle,
 } from "../../shared/vehicle-contract.js";
@@ -69,6 +71,78 @@ function clampDuration(ms: number | undefined): number | undefined {
   );
 }
 
+/**
+ * Apply the vehicle's drive tuning (action map, swap/invert) to a command
+ * the planner produced. Maps the *intent* (fwd/rev/turn-left/turn-right) to
+ * the *wire-level action* the firmware expects when the chassis is wired
+ * with rotated motors or a frame oriented 90/180°.
+ *
+ * Identity-map when no tuning is set, so existing vehicles keep working.
+ */
+function applyDriveTuning(
+  action: SkidSteerAction,
+  tuning: DriveTuning | undefined
+): SkidSteerAction {
+  if (!tuning) return action;
+
+  let next = remapAction(action, tuning);
+  if (tuning.swapSides && next.kind === "tank") {
+    next = { ...next, left: next.right, right: next.left };
+  }
+  if (next.kind === "tank") {
+    if (tuning.invertLeft) next = { ...next, left: -next.left };
+    if (tuning.invertRight) next = { ...next, right: -next.right };
+  }
+  return next;
+}
+
+function remapAction(
+  action: SkidSteerAction,
+  tuning: DriveTuning
+): SkidSteerAction {
+  // Pick the user-configured target for this intent.
+  let target: DriveMapTarget;
+  switch (action.kind) {
+    case "stop":
+      return action;
+    case "fwd":
+      target = tuning.map.forward;
+      break;
+    case "rev":
+      target = tuning.map.reverse;
+      break;
+    case "turn":
+      // Negative = left intent, positive = right intent (matches firmware).
+      target = action.signed < 0 ? tuning.map.left : tuning.map.right;
+      break;
+    case "tank":
+      // Tank commands are explicit per-wheel; don't reinterpret them.
+      return action;
+  }
+
+  // Re-shape the action to match the chosen target.
+  const dur = "durationMs" in action ? action.durationMs : undefined;
+  const mag =
+    action.kind === "fwd" || action.kind === "rev"
+      ? Math.abs(action.speed)
+      : action.kind === "turn"
+        ? Math.abs(action.signed)
+        : 0;
+
+  switch (target) {
+    case "stop":
+      return { kind: "stop" };
+    case "fwd":
+      return { kind: "fwd", speed: mag, durationMs: dur };
+    case "rev":
+      return { kind: "rev", speed: mag, durationMs: dur };
+    case "turn_left":
+      return { kind: "turn", signed: -mag, durationMs: dur };
+    case "turn_right":
+      return { kind: "turn", signed: mag, durationMs: dur };
+  }
+}
+
 function buildPath(action: SkidSteerAction): string {
   const dur = clampDuration("durationMs" in action ? action.durationMs : undefined);
   const durSuffix = dur === undefined ? "" : `&ms=${dur}`;
@@ -134,12 +208,41 @@ export async function getState(
   return parseJson<StateResponse>(body);
 }
 
+/**
+ * Hard rotation override for chassis whose firmware is wired 90° clockwise
+ * from the driver's intent (i.e. pressing "forward" makes it go right).
+ * Rotates every intent 90° counter-clockwise before sending.
+ * TODO: remove once the firmware's motor pins are re-labeled.
+ */
+function rotate90CCW(action: SkidSteerAction): SkidSteerAction {
+  const dur = "durationMs" in action ? action.durationMs : undefined;
+  switch (action.kind) {
+    case "stop":
+      return action;
+    case "fwd":
+      // forward intent -> turn left
+      return { kind: "turn", signed: -Math.abs(action.speed), durationMs: dur };
+    case "rev":
+      // reverse intent -> turn right
+      return { kind: "turn", signed: Math.abs(action.speed), durationMs: dur };
+    case "turn":
+      // left intent (signed<0) -> reverse; right intent (signed>=0) -> forward
+      return action.signed < 0
+        ? { kind: "rev", speed: Math.abs(action.signed), durationMs: dur }
+        : { kind: "fwd", speed: Math.abs(action.signed), durationMs: dur };
+    case "tank":
+      return action;
+  }
+}
+
 export async function sendCommand(
   vehicle: Vehicle,
   action: SkidSteerAction,
   opts: RequestOptions = {}
 ): Promise<CommandAck> {
-  const url = `${baseUrl(vehicle)}${buildPath(action)}`;
+  const rotated = rotate90CCW(action);
+  const effective = applyDriveTuning(rotated, vehicle.drive);
+  const url = `${baseUrl(vehicle)}${buildPath(effective)}`;
   const { status, body } = await httpGet(url, opts);
   if (status < 200 || status >= 300) {
     return { ok: false, error: `HTTP ${status}` };

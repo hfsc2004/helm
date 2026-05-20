@@ -1,6 +1,13 @@
 import { writable, type Writable } from "svelte/store";
 
-import type { Vehicle } from "@shared/vehicle-contract";
+import type {
+  BoardRole,
+  DriveFlashConfig,
+  DriveTuning,
+  Vehicle,
+  VideoFlashConfig,
+  WifiBoardConfig,
+} from "@shared/vehicle-contract";
 import type { StateStreamEvent } from "@shared/ipc-channels";
 
 interface FleetState {
@@ -26,11 +33,30 @@ function createFleetStore(): Writable<FleetState> & {
   remove: (id: string) => Promise<{ ok: boolean; error?: string }>;
   setCamera: (
     id: string,
-    camera: { baseUrl: string; streamPath?: string; snapshotPath?: string } | null
+    camera: {
+      baseUrl: string;
+      streamPath?: string;
+      snapshotPath?: string;
+      flashStatusPath?: string;
+    } | null
   ) => Promise<{ ok: boolean; vehicle?: Vehicle; error?: string }>;
   setAudio: (
     id: string,
     audio: { baseUrl: string; streamPath?: string } | null
+  ) => Promise<{ ok: boolean; vehicle?: Vehicle; error?: string }>;
+  setDrive: (
+    id: string,
+    drive: Partial<DriveTuning> | null
+  ) => Promise<{ ok: boolean; vehicle?: Vehicle; error?: string }>;
+  setWifi: (
+    id: string,
+    board: BoardRole,
+    wifi: WifiBoardConfig | null
+  ) => Promise<{ ok: boolean; vehicle?: Vehicle; error?: string }>;
+  setFlashConfig: (
+    id: string,
+    board: BoardRole,
+    flash: DriveFlashConfig | VideoFlashConfig | null
   ) => Promise<{ ok: boolean; vehicle?: Vehicle; error?: string }>;
 } {
   const store = writable<FleetState>({
@@ -102,6 +128,42 @@ function createFleetStore(): Writable<FleetState> & {
     },
     async setAudio(id, audio) {
       const res = await helm().vehicle.setAudio({ vehicleId: id, audio });
+      if (res.ok && res.vehicle) {
+        const vehicle = res.vehicle;
+        store.update((s) => ({
+          ...s,
+          vehicles: s.vehicles.map((v) => (v.id === id ? vehicle : v)),
+        }));
+        return { ok: true, vehicle };
+      }
+      return { ok: false, error: res.error };
+    },
+    async setDrive(id, drive) {
+      const res = await helm().vehicle.setDrive({ vehicleId: id, drive });
+      if (res.ok && res.vehicle) {
+        const vehicle = res.vehicle;
+        store.update((s) => ({
+          ...s,
+          vehicles: s.vehicles.map((v) => (v.id === id ? vehicle : v)),
+        }));
+        return { ok: true, vehicle };
+      }
+      return { ok: false, error: res.error };
+    },
+    async setWifi(id, board, wifi) {
+      const res = await helm().vehicle.setWifi({ vehicleId: id, board, wifi });
+      if (res.ok && res.vehicle) {
+        const vehicle = res.vehicle;
+        store.update((s) => ({
+          ...s,
+          vehicles: s.vehicles.map((v) => (v.id === id ? vehicle : v)),
+        }));
+        return { ok: true, vehicle };
+      }
+      return { ok: false, error: res.error };
+    },
+    async setFlashConfig(id, board, flash) {
+      const res = await helm().vehicle.setFlashConfig({ vehicleId: id, board, flash });
       if (res.ok && res.vehicle) {
         const vehicle = res.vehicle;
         store.update((s) => ({

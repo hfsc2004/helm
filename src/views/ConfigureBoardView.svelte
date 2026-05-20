@@ -7,13 +7,20 @@
     SerialPortInfo,
   } from "@shared/ipc-channels";
   import { backToList } from "../stores/devices-view";
+  import { fleet } from "../stores/vehicles";
 
   export let port: SerialPortInfo;
 
-  type BoardKind = "esp32" | "raspberry-pi-pico" | "raspberry-pi-pico-w" | "raspberry-pi-pico-2w";
+  type BoardKind =
+    | "esp32"
+    | "esp32-s3"
+    | "raspberry-pi-pico"
+    | "raspberry-pi-pico-w"
+    | "raspberry-pi-pico-2w";
 
   const BOARD_OPTIONS: Array<{ value: BoardKind; label: string }> = [
-    { value: "esp32", label: "ESP32 (classic, no -S3)" },
+    { value: "esp32", label: "ESP32 (drive board)" },
+    { value: "esp32-s3", label: "ESP32-S3 (video / camera board)" },
     { value: "raspberry-pi-pico", label: "Raspberry Pi Pico (RP2040, no WiFi)" },
     { value: "raspberry-pi-pico-w", label: "Raspberry Pi Pico W (RP2040 + WiFi)" },
     { value: "raspberry-pi-pico-2w", label: "Raspberry Pi Pico 2 W (RP2350 + WiFi)" },
@@ -37,19 +44,29 @@
   $: selectedTemplate = filteredTemplates.find((t) => t.id === selectedTemplateId) ?? null;
 
   function templateMatchesBoard(t: FlashTemplateSummary, b: BoardKind): boolean {
-    if (b === "esp32") return t.target === "esp32";
-    if (b.startsWith("raspberry-pi-pico")) return t.target === "pico" || t.target === "rp2040";
+    if (b === "esp32") {
+      // Drive-side templates (FQBN esp32:esp32:esp32) — not the S3 ones.
+      return t.target === "esp32" && !t.fqbn.includes("esp32s3");
+    }
+    if (b === "esp32-s3") {
+      return t.fqbn.includes("esp32s3");
+    }
+    if (b.startsWith("raspberry-pi-pico")) {
+      return t.target === "pico" || t.target === "rp2040";
+    }
     return false;
   }
 
-  // Re-pick a template when the board selector changes.
+  $: isVideoTemplate = selectedTemplate?.id === "video-esp32-s3";
+  $: boardRole = isVideoTemplate ? ("video" as const) : ("drive" as const);
+
   $: if (filteredTemplates.length === 1) {
     selectedTemplateId = filteredTemplates[0]!.id;
   } else if (!filteredTemplates.some((t) => t.id === selectedTemplateId)) {
     selectedTemplateId = "";
   }
 
-  // ---------- form state ----------
+  // ---------- common form state ----------
   let vehicleName = "";
   let vehicleSlug = "";
   $: vehicleSlug = vehicleName
@@ -63,12 +80,36 @@
   let staticIp = "192.168.1.50";
   let staticCidr = 24;
 
-  // Advanced — motor trims & invert flags, pulled from the template later.
+  // Drive-board advanced (motor trims & invert flags).
   let advancedOpen = false;
   let motorLeftTrim = 0;
   let motorRightTrim = 0;
   let motorInvertLeft = false;
   let motorInvertRight = false;
+
+  // Video-board specific (template var-driven).
+  let videoPinProfile = "esp32s3_eye";
+  let videoFrameSize = "VGA";
+  let videoJpegQuality = 12;
+  let videoHttpPort = 81;
+  let videoStreamPath = "/stream";
+  let videoSnapshotPath = "/capture";
+  let videoFlashStatusPath = "/health";
+  let videoEraseBeforeUpload = false;
+  let videoCaptureSerialMs = 20000;
+
+  // Existing vehicle to attach the camera sidecar to, when we flash the
+  // video board. Optional — if blank, the user can wire it up later from
+  // the Vehicles tab.
+  let attachToVehicleId = "";
+  $: fleetVehicles = $fleet.vehicles;
+
+  // Track which fields the user has typed in so we don't overwrite their input
+  // when re-applying template defaults.
+  const touched = new Set<string>();
+  function markTouched(key: string): void {
+    touched.add(key);
+  }
 
   // Apply per-template defaults whenever the selected template changes.
   $: if (selectedTemplate) {
@@ -89,15 +130,16 @@
         if (!touched.has("motorInvertLeft")) motorInvertLeft = d;
       } else if (v.key === "motor.invertRight" && typeof d === "boolean") {
         if (!touched.has("motorInvertRight")) motorInvertRight = d;
+      } else if (v.key === "camera.pinProfile" && typeof d === "string") {
+        if (!touched.has("videoPinProfile")) videoPinProfile = d;
+      } else if (v.key === "camera.frameSize" && typeof d === "string") {
+        if (!touched.has("videoFrameSize")) videoFrameSize = d;
+      } else if (v.key === "camera.jpegQuality" && typeof d === "number") {
+        if (!touched.has("videoJpegQuality")) videoJpegQuality = d;
+      } else if (v.key === "http.port" && typeof d === "number") {
+        if (!touched.has("videoHttpPort")) videoHttpPort = d;
       }
     }
-  }
-
-  // Track which fields the user has typed in so we don't overwrite their input
-  // when re-applying template defaults.
-  const touched = new Set<string>();
-  function markTouched(key: string): void {
-    touched.add(key);
   }
 
   // ---------- flash session ----------
@@ -124,7 +166,10 @@
     }
   }
 
-  onMount(refreshTemplates);
+  onMount(async () => {
+    await refreshTemplates();
+    await fleet.refresh();
+  });
 
   function appendLog(stage: string, text: string): void {
     const trimmed = text.replace(/\s+$/u, "");
@@ -136,6 +181,19 @@
   }
 
   function buildVars(): Record<string, unknown> {
+    if (isVideoTemplate) {
+      return {
+        "wifi.ssid": wifiSsid,
+        "wifi.password": wifiPassword,
+        "wifi.useStatic": ipMode === "static",
+        "wifi.staticIp": staticIp,
+        "wifi.staticCidr": staticCidr,
+        "http.port": videoHttpPort,
+        "camera.pinProfile": videoPinProfile,
+        "camera.frameSize": videoFrameSize,
+        "camera.jpegQuality": videoJpegQuality,
+      };
+    }
     return {
       "wifi.ssid": wifiSsid,
       "wifi.password": wifiPassword,
@@ -149,10 +207,26 @@
     };
   }
 
+  function pinProfileBuildProps(): string[] {
+    // Map the user-selected pin profile to a -D macro that selects the right
+    // pin block at compile time.
+    const map: Record<string, string> = {
+      esp32s3_eye: "build.extra_flags=-DCAMERA_PIN_PROFILE_ESP32S3_EYE",
+      ai_thinker_s3: "build.extra_flags=-DCAMERA_PIN_PROFILE_AI_THINKER_S3",
+      elegoo_s3: "build.extra_flags=-DCAMERA_PIN_PROFILE_ELEGOO_S3",
+    };
+    const flag = map[videoPinProfile];
+    return flag ? [flag] : [];
+  }
+
   function canFlash(): boolean {
     if (flashing) return false;
     if (!selectedTemplate) return false;
-    if (!vehicleName.trim() || !vehicleSlug) return false;
+    if (!vehicleName.trim() || !vehicleSlug) {
+      if (!isVideoTemplate) return false;
+      // For video, name is optional — we can attach to an existing vehicle.
+      if (!attachToVehicleId) return false;
+    }
     if (!wifiSsid.trim() || !wifiPassword) return false;
     if (ipMode === "static") {
       const m = staticIp.trim().match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
@@ -176,7 +250,13 @@
       templateId: selectedTemplate.id,
       port: port.path,
       vars: buildVars(),
+      board: boardRole,
     };
+    if (isVideoTemplate) {
+      req.buildProperties = pinProfileBuildProps();
+      req.eraseBeforeUpload = videoEraseBeforeUpload;
+      req.captureRuntimeSerialMs = videoCaptureSerialMs > 0 ? videoCaptureSerialMs : undefined;
+    }
 
     try {
       flashHandle = await window.helm.flash.start(req, (raw) => {
@@ -190,7 +270,7 @@
           flashResult = ev.ok ? "ok" : "fail";
           if (!ev.ok && ev.reason) flashReason = ev.reason;
           flashing = false;
-          if (ev.ok) void addToRegistry();
+          if (ev.ok) void afterSuccessfulFlash();
         } else if (ev.stage === "error") {
           flashResult = "fail";
           flashReason = ev.reason ?? ev.message;
@@ -217,21 +297,65 @@
     }
   }
 
-  async function addToRegistry(): Promise<void> {
+  async function afterSuccessfulFlash(): Promise<void> {
+    if (isVideoTemplate) {
+      // Attach the camera sidecar to either an existing vehicle (attachToVehicleId)
+      // or to a freshly-created one.
+      addingToRegistry = true;
+      registryAddError = null;
+      try {
+        let targetId = attachToVehicleId;
+        if (!targetId && vehicleName.trim()) {
+          const addRes = await fleet.add({
+            name: vehicleName.trim(),
+            host: ipMode === "static" ? staticIp.trim() : staticIp.trim(),
+          });
+          if (!addRes.ok || !addRes.vehicle) {
+            registryAddError = addRes.error ?? "vehicle create failed";
+            return;
+          }
+          targetId = addRes.vehicle.id;
+        }
+        if (!targetId) {
+          registryAddError = "no vehicle to attach the camera to";
+          return;
+        }
+        const camRes = await fleet.setCamera(targetId, {
+          baseUrl: `http://${staticIp.trim()}:${videoHttpPort}`,
+          streamPath: videoStreamPath,
+          snapshotPath: videoSnapshotPath,
+          flashStatusPath: videoFlashStatusPath,
+        });
+        if (!camRes.ok) {
+          registryAddError = camRes.error ?? "camera attach failed";
+          return;
+        }
+        registryAddOk = true;
+      } finally {
+        addingToRegistry = false;
+      }
+      return;
+    }
+
+    // Drive board: create the vehicle and persist drive tuning.
     addingToRegistry = true;
     registryAddError = null;
     try {
-      const host = ipMode === "static" ? staticIp.trim() : staticIp.trim();
-      const res = await window.helm.vehicle.add({
+      const res = await fleet.add({
         name: vehicleName.trim(),
-        host,
-        kind: "ground",
+        host: ipMode === "static" ? staticIp.trim() : staticIp.trim(),
       });
-      if (res.ok) {
-        registryAddOk = true;
-      } else {
+      if (!res.ok || !res.vehicle) {
         registryAddError = res.error ?? "add failed";
+        return;
       }
+      // Persist motor invert flags as drive tuning so they're reachable
+      // from the CLI / Vehicles tab without re-flashing.
+      await fleet.setDrive(res.vehicle.id, {
+        invertLeft: motorInvertLeft,
+        invertRight: motorInvertRight,
+      });
+      registryAddOk = true;
     } catch (err) {
       registryAddError = err instanceof Error ? err.message : String(err);
     } finally {
@@ -258,7 +382,6 @@
   </header>
 
   <div class="form">
-    <!-- Board -->
     <section>
       <h3>Board</h3>
       <label>
@@ -274,7 +397,6 @@
       {/if}
     </section>
 
-    <!-- Template -->
     <section>
       <h3>Firmware template</h3>
       {#if templatesLoading}
@@ -283,7 +405,7 @@
         <p class="error">{templatesError}</p>
       {:else if filteredTemplates.length === 0}
         <p class="muted">
-          No templates target this board yet. Flashing for this board lands in a follow-up.
+          No templates target this board yet.
         </p>
       {:else}
         <label>
@@ -300,25 +422,54 @@
       {/if}
     </section>
 
-    <!-- Identity -->
-    <section>
-      <h3>Vehicle identity</h3>
-      <label>
-        <span class="lbl">Name</span>
-        <input
-          type="text"
-          bind:value={vehicleName}
-          on:input={() => markTouched("vehicleName")}
-          placeholder="Truck"
-          disabled={flashing}
-        />
-      </label>
-      <p class="muted small">
-        ID: <code>{vehicleSlug || "—"}</code>
-      </p>
-    </section>
+    {#if isVideoTemplate}
+      <section>
+        <h3>Attach to vehicle</h3>
+        <p class="muted small">
+          The camera sidecar attaches to a vehicle by its IP. Pick an existing one,
+          or leave blank and we'll create a new vehicle with the name below.
+        </p>
+        <label>
+          <span class="lbl">Existing vehicle (optional)</span>
+          <select bind:value={attachToVehicleId} disabled={flashing}>
+            <option value="">— create new vehicle —</option>
+            {#each fleetVehicles as v (v.id)}
+              <option value={v.id}>{v.name} ({v.transport.host})</option>
+            {/each}
+          </select>
+        </label>
+        {#if !attachToVehicleId}
+          <label>
+            <span class="lbl">New vehicle name</span>
+            <input
+              type="text"
+              bind:value={vehicleName}
+              on:input={() => markTouched("vehicleName")}
+              placeholder="Truck"
+              disabled={flashing}
+            />
+          </label>
+        {/if}
+      </section>
+    {:else}
+      <section>
+        <h3>Vehicle identity</h3>
+        <label>
+          <span class="lbl">Name</span>
+          <input
+            type="text"
+            bind:value={vehicleName}
+            on:input={() => markTouched("vehicleName")}
+            placeholder="Truck"
+            disabled={flashing}
+          />
+        </label>
+        <p class="muted small">
+          ID: <code>{vehicleSlug || "—"}</code>
+        </p>
+      </section>
+    {/if}
 
-    <!-- WiFi -->
     <section>
       <h3>WiFi</h3>
       <label>
@@ -343,7 +494,6 @@
       </label>
     </section>
 
-    <!-- Networking -->
     <section>
       <h3>Networking</h3>
       <div class="radio-row">
@@ -391,19 +541,56 @@
           />
         </label>
         <p class="muted small">
-          The vehicle will be reached at this IP after flash. The Drive tab uses
-          this as the host.
+          The board will be reached at this IP after flash.
         </p>
       {:else}
         <p class="muted small">
-          DHCP: the truck firmware prints its assigned IP to serial on boot.
-          You'll need to discover it before driving.
+          DHCP: the board prints its assigned IP to serial on boot.
         </p>
       {/if}
     </section>
 
-    <!-- Advanced -->
-    {#if selectedTemplate}
+    {#if isVideoTemplate}
+      <section>
+        <h3>Camera</h3>
+        <label>
+          <span class="lbl">Pin profile</span>
+          <select bind:value={videoPinProfile} disabled={flashing}>
+            <option value="esp32s3_eye">ESP32-S3-EYE (Espressif dev board)</option>
+            <option value="ai_thinker_s3">AI-Thinker ESP32-S3-CAM</option>
+            <option value="elegoo_s3">Elegoo ESP32-S3-WROOM-1 shield</option>
+          </select>
+        </label>
+        <label>
+          <span class="lbl">Default frame size</span>
+          <select bind:value={videoFrameSize} disabled={flashing}>
+            <option value="QVGA">QVGA (320×240)</option>
+            <option value="VGA">VGA (640×480)</option>
+            <option value="SVGA">SVGA (800×600)</option>
+            <option value="XGA">XGA (1024×768)</option>
+            <option value="HD">HD (1280×720)</option>
+          </select>
+        </label>
+        <label>
+          <span class="lbl">JPEG quality (0..63, lower=better)</span>
+          <input type="number" min="0" max="63" bind:value={videoJpegQuality} disabled={flashing} />
+        </label>
+        <label>
+          <span class="lbl">HTTP port</span>
+          <input type="number" min="1" max="65535" bind:value={videoHttpPort} disabled={flashing} />
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" bind:checked={videoEraseBeforeUpload} disabled={flashing} />
+          Erase flash before upload
+        </label>
+        <label>
+          <span class="lbl">Post-upload serial capture (ms)</span>
+          <input type="number" min="0" max="120000" bind:value={videoCaptureSerialMs} disabled={flashing} />
+        </label>
+      </section>
+    {/if}
+
+    {#if selectedTemplate && !isVideoTemplate}
       <section>
         <button
           class="disclosure"
@@ -416,42 +603,18 @@
           <div class="advanced">
             <label>
               <span class="lbl">Left motor trim (-40..40)</span>
-              <input
-                type="number"
-                min="-40"
-                max="40"
-                bind:value={motorLeftTrim}
-                on:input={() => markTouched("motorLeftTrim")}
-                disabled={flashing}
-              />
+              <input type="number" min="-40" max="40" bind:value={motorLeftTrim} disabled={flashing} />
             </label>
             <label>
               <span class="lbl">Right motor trim (-40..40)</span>
-              <input
-                type="number"
-                min="-40"
-                max="40"
-                bind:value={motorRightTrim}
-                on:input={() => markTouched("motorRightTrim")}
-                disabled={flashing}
-              />
+              <input type="number" min="-40" max="40" bind:value={motorRightTrim} disabled={flashing} />
             </label>
             <label class="checkbox">
-              <input
-                type="checkbox"
-                bind:checked={motorInvertLeft}
-                on:change={() => markTouched("motorInvertLeft")}
-                disabled={flashing}
-              />
+              <input type="checkbox" bind:checked={motorInvertLeft} disabled={flashing} />
               Invert left motor
             </label>
             <label class="checkbox">
-              <input
-                type="checkbox"
-                bind:checked={motorInvertRight}
-                on:change={() => markTouched("motorInvertRight")}
-                disabled={flashing}
-              />
+              <input type="checkbox" bind:checked={motorInvertRight} disabled={flashing} />
               Invert right motor
             </label>
           </div>
@@ -459,16 +622,10 @@
       </section>
     {/if}
 
-    <!-- Actions -->
     <section class="actions">
       {#if !flashing}
-        <button
-          class="flash"
-          type="button"
-          on:click={startFlash}
-          disabled={!canFlash()}
-        >
-          Flash
+        <button class="flash" type="button" on:click={startFlash} disabled={!canFlash()}>
+          Flash {boardRole === "video" ? "video" : "drive"} board
         </button>
       {:else}
         <button class="cancel" type="button" on:click={cancelFlash}>
@@ -480,7 +637,6 @@
       {/if}
     </section>
 
-    <!-- Live log + result -->
     {#if logLines.length > 0 || flashing || flashResult}
       <section>
         <h3>Flash log</h3>
@@ -491,16 +647,14 @@
 
         {#if flashResult === "ok"}
           {#if addingToRegistry}
-            <p class="muted small">Flash succeeded. Adding to vehicle registry…</p>
+            <p class="muted small">Flash succeeded. Updating vehicle registry…</p>
           {:else if registryAddOk}
             <p class="ok">
-              Flashed and added to registry as <code>{vehicleSlug}</code>.
+              Flashed and registered.
               <button class="link" type="button" on:click={close}>Back to Devices →</button>
             </p>
           {:else if registryAddError}
-            <p class="error">
-              Flash succeeded but registry add failed: {registryAddError}
-            </p>
+            <p class="error">Flash succeeded but registry update failed: {registryAddError}</p>
           {/if}
         {:else if flashResult === "fail"}
           <p class="error">Flash failed{flashReason ? `: ${flashReason}` : "."}</p>

@@ -10,6 +10,17 @@
  *   is responsible for actually enforcing it (deadman timer, RTH, etc.).
  * - The command shape is a tagged union per `Action`. Each vehicle's
  *   capabilities determine which actions it accepts.
+ *
+ * Dual-board layout (drive + video):
+ * - `transport` is the *drive* board (typically an ESP32) — its own IP/port
+ *   on the LAN, its own Wi-Fi creds in `wifi.drive`, its own flash params
+ *   in `flash.drive`.
+ * - `camera` is the *video* board (typically an ESP32-S3) — its own IP/port,
+ *   its own creds in `wifi.video`, its own flash params in `flash.video`.
+ * - The two boards run independently; either can be present without the
+ *   other. The runtime endpoints (`transport`, `camera`) are what Helm
+ *   talks to at drive time; `wifi.*` and `flash.*` are install-time config
+ *   the user supplied so we can re-flash or document the vehicle later.
  */
 
 export type VehicleKind = "ground" | "air";
@@ -29,11 +40,93 @@ export type CoordinateFrame =
 
 export type LossOfCommsBehavior = "stop" | "hover" | "rth" | "land";
 
+/** Which of a vehicle's two boards a given config block applies to. */
+export type BoardRole = "drive" | "video";
+
+export interface StaticIpConfig {
+  ip: string;
+  cidr: number;
+  gatewayEnabled: boolean;
+  gateway: string;
+}
+
+export interface WifiBoardConfig {
+  ssid: string;
+  password: string;
+  /** Omit/null for DHCP. */
+  static?: StaticIpConfig;
+}
+
+/** Flash-time params for the drive board (ESP32 classic). */
+export interface DriveFlashConfig {
+  fqbn: string;
+  sketchName: string;
+  compileTimeoutMs?: number;
+  uploadTimeoutMs?: number;
+  monitorBaudRate?: number;
+}
+
+/** Flash-time params for the video board (ESP32-S3 camera). */
+export interface VideoFlashConfig {
+  fqbn: string;
+  /** e.g. "elegoo-esp32s3-camera-v1". Selects pin/sensor profile. */
+  boardProfile?: string;
+  /** Optional explicit override of camera pin profile. */
+  pinProfile?: string;
+  /** Path to an alternate esp32-camera library (advanced). */
+  libraryPath?: string;
+  usbCdcOnBoot?: boolean;
+  eraseBeforeUpload?: boolean;
+  /** Capture serial output for N ms after upload so the user can see the
+   *  vehicle's first-boot logs (IP it acquired, sensor init, etc.). */
+  captureRuntimeSerial?: boolean;
+  runtimeSerialCaptureMs?: number;
+  /** If false, the camera board acts only as an AP — it does not join the LAN. */
+  staEnabled?: boolean;
+}
+
+/** Drive-side runtime tuning (lifted from core-ce Gateway Card "wifiDrive*"). */
+export interface DriveTuning {
+  /** Default forward/reverse speed magnitude (0..255). */
+  speed: number;
+  swapSides: boolean;
+  invertLeft: boolean;
+  invertRight: boolean;
+  /** Maps incoming logical actions to the wire-level action the firmware expects.
+   *  Some chassis are wired with flipped motors or rotated frames; this lets
+   *  the user re-label without re-flashing. */
+  map: {
+    forward: DriveMapTarget;
+    reverse: DriveMapTarget;
+    left: DriveMapTarget;
+    right: DriveMapTarget;
+  };
+  /** Show on-screen number controls in the driver view. */
+  numControlsEnabled: boolean;
+  /** Front-ultrasonic stop threshold, mm. 0 disables. */
+  obstacleFrontThreshold: number;
+  /** Autonomous "AI drive" loop config. Off by default; opt-in only. */
+  aiDrive?: {
+    enabled: boolean;
+    agentId: string;
+    objective: string;
+    tickMs: number;
+  };
+}
+
+export type DriveMapTarget =
+  | "fwd"
+  | "rev"
+  | "turn_left"
+  | "turn_right"
+  | "stop";
+
 export interface Vehicle {
   id: string;
   name: string;
   kind: VehicleKind;
   capabilities: VehicleCapability[];
+  /** Drive board runtime endpoint. */
   transport: {
     host: string;
     port: number;
@@ -46,6 +139,8 @@ export interface Vehicle {
     streamPath?: string;
     /** Default "/capture". One-shot JPEG endpoint. */
     snapshotPath?: string;
+    /** Default "/health". Camera-board health probe. */
+    flashStatusPath?: string;
   };
   /**
    * Optional audio sidecar (roving microphone — vehicle streams its own
@@ -57,6 +152,18 @@ export interface Vehicle {
     baseUrl: string;
     /** Default "/audio". Chunked PCM (16kHz mono 16-bit) over HTTP. */
     streamPath?: string;
+  };
+  /** Drive-side tuning. Optional — defaults applied client-side if absent. */
+  drive?: DriveTuning;
+  /** Per-board Wi-Fi credentials (install-time, used by the flash flow). */
+  wifi?: {
+    drive?: WifiBoardConfig;
+    video?: WifiBoardConfig;
+  };
+  /** Per-board flash params (install-time, used by the flash flow). */
+  flash?: {
+    drive?: DriveFlashConfig;
+    video?: VideoFlashConfig;
   };
   coordinateFrame: CoordinateFrame;
   lossOfCommsBehavior: LossOfCommsBehavior;
@@ -88,3 +195,18 @@ export const COMMAND_LIMITS = {
   durationMinMs: 100,
   durationMaxMs: 5000,
 } as const;
+
+export const DRIVE_TUNING_DEFAULTS: DriveTuning = {
+  speed: 170,
+  swapSides: false,
+  invertLeft: false,
+  invertRight: false,
+  map: {
+    forward: "fwd",
+    reverse: "rev",
+    left: "turn_left",
+    right: "turn_right",
+  },
+  numControlsEnabled: true,
+  obstacleFrontThreshold: 0,
+};

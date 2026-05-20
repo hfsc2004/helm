@@ -53,6 +53,23 @@ export interface FlashRequest {
   vars: Record<string, unknown>;
   /** If true, render + write the sketch but do not compile or upload. */
   dryRun?: boolean;
+  /**
+   * Optional board override — chooses which side of a dual-board vehicle this
+   * flash targets. Used only to label progress events; the template id is
+   * still the source of truth for what gets compiled.
+   */
+  board?: "drive" | "video";
+  /** Override the template's FQBN (rare; use when one board has a variant). */
+  fqbnOverride?: string;
+  /** Extra --build-property KEY=VALUE pairs for compile (USB-CDC, partitions, …). */
+  buildProperties?: string[];
+  /** Pass --erase-flash to arduino-cli upload before writing the new image. */
+  eraseBeforeUpload?: boolean;
+  /** After a successful upload, hold the port open and stream serial for N ms
+   *  so the user can see first-boot output (typical for ESP32-S3 cam boards). */
+  captureRuntimeSerialMs?: number;
+  /** Baud rate used for the post-upload serial capture. Defaults to 115200. */
+  monitorBaudRate?: number;
 }
 
 export type ProgressCallback = (event: FlashEvent) => void;
@@ -166,12 +183,19 @@ export async function flash(
     };
   }
 
-  onProgress({ stage: "prepare", message: `loading template ${req.templateId}` });
+  const boardLabel = req.board ? ` [${req.board} board]` : "";
+  onProgress({
+    stage: "prepare",
+    message: `loading template ${req.templateId}${boardLabel}`,
+  });
   const tmpl = loadTemplate(req.templateId);
   if (!tmpl) {
     onProgress({ stage: "error", message: `template not found: ${req.templateId}` });
     return { ok: false, reason: "template not found" };
   }
+  const fqbn = req.fqbnOverride && req.fqbnOverride.trim()
+    ? req.fqbnOverride.trim()
+    : tmpl.manifest.fqbn;
 
   onProgress({ stage: "render", message: "applying template variables" });
   const rendered = renderSketch(tmpl, req.vars);
@@ -193,7 +217,7 @@ export async function flash(
       stage: "complete",
       message: "dry-run: sketch written, not flashed",
       ok: true,
-      fqbn: tmpl.manifest.fqbn,
+      fqbn,
       sketchPath,
       durationMs: Date.now() - startedAt,
     });
@@ -223,16 +247,21 @@ export async function flash(
   }
 
   // Compile.
-  onProgress({ stage: "compile", message: `arduino-cli compile (${tmpl.manifest.fqbn})` });
+  onProgress({ stage: "compile", message: `arduino-cli compile (${fqbn})` });
   const compileSession = bmoc.registerSession({
     type: "arduino-compile",
     pid: undefined,
     sketchPath,
-    fqbn: tmpl.manifest.fqbn,
+    fqbn,
   });
+  const compileArgs = [...cli.baseArgs, "compile", "--fqbn", fqbn];
+  for (const prop of req.buildProperties ?? []) {
+    compileArgs.push("--build-property", prop);
+  }
+  compileArgs.push(sketchDir);
   const compile = await runCommandAsync(
     cli.bin,
-    [...cli.baseArgs, "compile", "--fqbn", tmpl.manifest.fqbn, sketchDir],
+    compileArgs,
     {
       env: cli.env,
       timeoutMs: 600000,
@@ -263,20 +292,15 @@ export async function flash(
     type: "arduino-upload",
     pid: undefined,
     sketchPath,
-    fqbn: tmpl.manifest.fqbn,
+    fqbn,
     serialPort: req.port,
   });
+  const uploadArgs = [...cli.baseArgs, "upload", "--fqbn", fqbn, "--port", req.port];
+  if (req.eraseBeforeUpload) uploadArgs.push("--erase");
+  uploadArgs.push(sketchDir);
   const upload = await runCommandAsync(
     cli.bin,
-    [
-      ...cli.baseArgs,
-      "upload",
-      "--fqbn",
-      tmpl.manifest.fqbn,
-      "--port",
-      req.port,
-      sketchDir,
-    ],
+    uploadArgs,
     {
       env: cli.env,
       timeoutMs: 300000,
@@ -301,11 +325,60 @@ export async function flash(
     return { ok: false, reason };
   }
 
+  // Optional post-upload serial capture (lets the user see the first-boot
+  // output — IP acquired, sensor init, etc.). Best-effort: if arduino-cli
+  // monitor isn't supported on this version, we just skip.
+  const captureMs = req.captureRuntimeSerialMs ?? 0;
+  if (captureMs > 0) {
+    const baud = req.monitorBaudRate ?? 115200;
+    onProgress({
+      stage: "upload",
+      message: `capturing serial output for ${Math.round(captureMs / 1000)}s @ ${baud}`,
+    });
+    const monitorArgs = [
+      ...cli.baseArgs,
+      "monitor",
+      "--port",
+      req.port,
+      "--config",
+      `baudrate=${baud}`,
+    ];
+    let killed = false;
+    const killTimer = setTimeout(() => {
+      killed = true;
+      const target = active;
+      if (target) {
+        try {
+          target.kill();
+        } catch {
+          // already dead
+        }
+      }
+    }, captureMs);
+    try {
+      await runCommandAsync(cli.bin, monitorArgs, {
+        env: cli.env,
+        timeoutMs: captureMs + 5000,
+        onStdout: (c) => onProgress({ stage: "upload", message: "serial", chunk: c }),
+        onStderr: (c) => onProgress({ stage: "upload", message: "serial-err", chunk: c }),
+        onProcess: (child) => {
+          active = { kill: () => child.kill("SIGKILL") };
+        },
+      });
+    } finally {
+      clearTimeout(killTimer);
+      active = null;
+      if (!killed) {
+        // arduino-cli monitor exited on its own (probably unsupported); fine.
+      }
+    }
+  }
+
   onProgress({
     stage: "complete",
     message: "flashed",
     ok: true,
-    fqbn: tmpl.manifest.fqbn,
+    fqbn,
     port: req.port,
     sketchPath,
     durationMs: Date.now() - startedAt,

@@ -1,0 +1,21 @@
+{
+  "id": "video-esp32-s3",
+  "name": "Video board (ESP32-S3 camera)",
+  "description": "MJPEG/JPEG camera streamer for an ESP32-S3 (e.g. Elegoo S3 camera, ESP32-S3-EYE, AI-Thinker S3-CAM). Exposes /stream, /capture, /health on a configurable port. Joins the LAN as STA.",
+  "target": "esp32",
+  "fqbn": "esp32:esp32:esp32s3",
+  "core": "esp32:esp32",
+  "vehicleKind": "ground",
+  "capabilities": ["camera.mjpeg"],
+  "vars": [
+    { "key": "wifi.ssid",          "type": "string",  "required": true,  "label": "WiFi SSID" },
+    { "key": "wifi.password",      "type": "secret",  "required": true,  "label": "WiFi password" },
+    { "key": "wifi.useStatic",     "type": "boolean", "default": true,   "label": "Use a static IP?" },
+    { "key": "wifi.staticIp",      "type": "string",  "default": "192.168.1.51", "label": "Static IP" },
+    { "key": "wifi.staticCidr",    "type": "number",  "default": 24,     "label": "Static CIDR prefix (0–32)" },
+    { "key": "http.port",          "type": "number",  "default": 81,     "label": "HTTP port" },
+    { "key": "camera.pinProfile",  "type": "string",  "default": "esp32s3_eye", "label": "Pin profile (ai_thinker_s3 | esp32s3_eye | elegoo_s3)" },
+    { "key": "camera.frameSize",   "type": "string",  "default": "VGA",  "label": "Default frame size (QVGA | VGA | SVGA | XGA | HD)" },
+    { "key": "camera.jpegQuality", "type": "number",  "default": 12,     "label": "JPEG quality (0..63, lower=better)" }
+  ]
+}

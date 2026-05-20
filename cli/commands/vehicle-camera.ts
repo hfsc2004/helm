@@ -35,6 +35,12 @@ const setCamera: RuntimeCommand = {
         default: "/capture",
         description: "JPEG snapshot endpoint path.",
       },
+      {
+        name: "flash-status-path",
+        kind: "string",
+        default: "/health",
+        description: "Camera-board health probe path.",
+      },
     ],
     streams: false,
     events: [],
@@ -55,6 +61,7 @@ const setCamera: RuntimeCommand = {
       baseUrl,
       streamPath: String(flags["stream-path"] ?? "/stream"),
       snapshotPath: String(flags["snapshot-path"] ?? "/capture"),
+      flashStatusPath: String(flags["flash-status-path"] ?? "/health"),
     });
     if (!updated) {
       emit({ error: `No vehicle with id ${id}.` });

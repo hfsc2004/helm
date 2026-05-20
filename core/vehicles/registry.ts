@@ -1,7 +1,14 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-import type { Vehicle } from "../../shared/vehicle-contract.js";
+import type {
+  BoardRole,
+  DriveFlashConfig,
+  DriveTuning,
+  Vehicle,
+  VideoFlashConfig,
+  WifiBoardConfig,
+} from "../../shared/vehicle-contract.js";
 import { paths } from "../paths.js";
 import { STORAGE_LIMITS } from "../storage/limits.js";
 
@@ -45,6 +52,17 @@ function save(file: RegistryFile): void {
   const dir = dirname(path);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   writeFileSync(path, JSON.stringify(file, null, 2), "utf8");
+}
+
+function mutate(id: string, fn: (vehicle: Vehicle) => void): Vehicle | null {
+  const file = load();
+  const idx = file.vehicles.findIndex((v) => v.id === id);
+  if (idx < 0) return null;
+  const vehicle = file.vehicles[idx]!;
+  fn(vehicle);
+  file.vehicles[idx] = vehicle;
+  save(file);
+  return vehicle;
 }
 
 export function list(): Vehicle[] {
@@ -107,29 +125,26 @@ export interface SetCameraInput {
   baseUrl: string;
   streamPath?: string;
   snapshotPath?: string;
+  flashStatusPath?: string;
 }
 
 export function setCamera(id: string, input: SetCameraInput | null): Vehicle | null {
-  const file = load();
-  const idx = file.vehicles.findIndex((v) => v.id === id);
-  if (idx < 0) return null;
-  const vehicle = file.vehicles[idx]!;
-  if (input === null) {
-    delete vehicle.camera;
-    vehicle.capabilities = vehicle.capabilities.filter((c) => c !== "camera.mjpeg");
-  } else {
+  return mutate(id, (vehicle) => {
+    if (input === null) {
+      delete vehicle.camera;
+      vehicle.capabilities = vehicle.capabilities.filter((c) => c !== "camera.mjpeg");
+      return;
+    }
     vehicle.camera = {
       baseUrl: input.baseUrl,
       streamPath: input.streamPath ?? "/stream",
       snapshotPath: input.snapshotPath ?? "/capture",
+      flashStatusPath: input.flashStatusPath ?? "/health",
     };
     if (!vehicle.capabilities.includes("camera.mjpeg")) {
       vehicle.capabilities = [...vehicle.capabilities, "camera.mjpeg"];
     }
-  }
-  file.vehicles[idx] = vehicle;
-  save(file);
-  return vehicle;
+  });
 }
 
 export interface SetAudioInput {
@@ -138,14 +153,12 @@ export interface SetAudioInput {
 }
 
 export function setAudio(id: string, input: SetAudioInput | null): Vehicle | null {
-  const file = load();
-  const idx = file.vehicles.findIndex((v) => v.id === id);
-  if (idx < 0) return null;
-  const vehicle = file.vehicles[idx]!;
-  if (input === null) {
-    delete vehicle.audio;
-    vehicle.capabilities = vehicle.capabilities.filter((c) => c !== "audio.pcm");
-  } else {
+  return mutate(id, (vehicle) => {
+    if (input === null) {
+      delete vehicle.audio;
+      vehicle.capabilities = vehicle.capabilities.filter((c) => c !== "audio.pcm");
+      return;
+    }
     vehicle.audio = {
       baseUrl: input.baseUrl,
       streamPath: input.streamPath ?? "/audio",
@@ -153,8 +166,103 @@ export function setAudio(id: string, input: SetAudioInput | null): Vehicle | nul
     if (!vehicle.capabilities.includes("audio.pcm")) {
       vehicle.capabilities = [...vehicle.capabilities, "audio.pcm"];
     }
-  }
-  file.vehicles[idx] = vehicle;
-  save(file);
-  return vehicle;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Dual-board mutators
+// ---------------------------------------------------------------------------
+
+export function setDrive(
+  id: string,
+  drive: Partial<DriveTuning> | null
+): Vehicle | null {
+  return mutate(id, (vehicle) => {
+    if (drive === null) {
+      delete vehicle.drive;
+      return;
+    }
+    const prev = vehicle.drive;
+    vehicle.drive = {
+      speed: drive.speed ?? prev?.speed ?? 170,
+      swapSides: drive.swapSides ?? prev?.swapSides ?? false,
+      invertLeft: drive.invertLeft ?? prev?.invertLeft ?? false,
+      invertRight: drive.invertRight ?? prev?.invertRight ?? false,
+      map: {
+        forward: drive.map?.forward ?? prev?.map.forward ?? "fwd",
+        reverse: drive.map?.reverse ?? prev?.map.reverse ?? "rev",
+        left: drive.map?.left ?? prev?.map.left ?? "turn_left",
+        right: drive.map?.right ?? prev?.map.right ?? "turn_right",
+      },
+      numControlsEnabled:
+        drive.numControlsEnabled ?? prev?.numControlsEnabled ?? true,
+      obstacleFrontThreshold:
+        drive.obstacleFrontThreshold ?? prev?.obstacleFrontThreshold ?? 0,
+      ...(drive.aiDrive || prev?.aiDrive
+        ? {
+            aiDrive: {
+              enabled: drive.aiDrive?.enabled ?? prev?.aiDrive?.enabled ?? false,
+              agentId: drive.aiDrive?.agentId ?? prev?.aiDrive?.agentId ?? "",
+              objective:
+                drive.aiDrive?.objective ??
+                prev?.aiDrive?.objective ??
+                "Explore safely and avoid obstacles.",
+              tickMs: drive.aiDrive?.tickMs ?? prev?.aiDrive?.tickMs ?? 420,
+            },
+          }
+        : {}),
+    };
+  });
+}
+
+export function setWifi(
+  id: string,
+  board: BoardRole,
+  wifi: WifiBoardConfig | null
+): Vehicle | null {
+  return mutate(id, (vehicle) => {
+    const current = vehicle.wifi ?? {};
+    if (wifi === null) {
+      delete current[board];
+    } else {
+      current[board] = wifi;
+    }
+    if (current.drive || current.video) {
+      vehicle.wifi = current;
+    } else {
+      delete vehicle.wifi;
+    }
+  });
+}
+
+export function setFlash(
+  id: string,
+  board: "drive",
+  flash: DriveFlashConfig | null
+): Vehicle | null;
+export function setFlash(
+  id: string,
+  board: "video",
+  flash: VideoFlashConfig | null
+): Vehicle | null;
+export function setFlash(
+  id: string,
+  board: BoardRole,
+  flash: DriveFlashConfig | VideoFlashConfig | null
+): Vehicle | null {
+  return mutate(id, (vehicle) => {
+    const current = vehicle.flash ?? {};
+    if (flash === null) {
+      delete current[board];
+    } else if (board === "drive") {
+      current.drive = flash as DriveFlashConfig;
+    } else {
+      current.video = flash as VideoFlashConfig;
+    }
+    if (current.drive || current.video) {
+      vehicle.flash = current;
+    } else {
+      delete vehicle.flash;
+    }
+  });
 }

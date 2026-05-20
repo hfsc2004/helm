@@ -12,6 +12,9 @@ import type {
   VehicleAddRequest,
   VehicleCmdRequest,
   VehicleRemoveRequest,
+  VehicleCameraSnapshotRequest,
+  VehicleCameraSnapshotResponse,
+  VehicleCameraStreamOpenRequest,
   VehicleSetAudioRequest,
   VehicleSetCameraRequest,
   VehicleSetDriveRequest,
@@ -26,6 +29,7 @@ import type {
 
 import * as registry from "../../core/vehicles/registry.js";
 import * as adapter from "../../core/vehicles/ground-skidsteer.js";
+import * as cameraStream from "../../core/vehicles/camera-stream.js";
 import * as ollamaManager from "../../core/llm/ollama/manager.js";
 import { plan, DEFAULT_PLANNER_MODEL } from "../../core/llm/planner.js";
 import { listSerialPorts } from "../../core/serial/index.js";
@@ -120,6 +124,119 @@ export function registerIpcHandlers(opts: { version: string }): void {
       ? { ok: true, vehicle: updated }
       : { ok: false, error: `no vehicle ${req.vehicleId}` };
   });
+
+  // ---------- camera stream cache ----------
+  //
+  // Renderer holds a long-lived handle for the lifetime of the Drive view.
+  // Other in-process consumers (CLI helpers, future planner) acquire
+  // additional handles. The first acquire opens one upstream connection
+  // to /stream; subsequent acquires share it. The Elegoo / esp32-camera
+  // firmware can only serve one HTTP client at a time, so this is the
+  // only safe pattern.
+
+  const cameraConsumers = new Map<string, { release: () => Promise<void> }>();
+
+  function consumerId(): string {
+    return `cam_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  ipcMain.handle(
+    IPC.vehicle.cameraStreamOpen,
+    async (event, req: VehicleCameraStreamOpenRequest) => {
+      const vehicle = registry.get(req.vehicleId);
+      if (!vehicle) throw new Error(`no vehicle ${req.vehicleId}`);
+      const handle = cameraStream.acquire(vehicle);
+      if (!handle) throw new Error(`vehicle ${req.vehicleId} has no camera configured`);
+      const id = consumerId();
+      cameraConsumers.set(id, { release: () => handle.release() });
+
+      // Auto-release if the renderer window closes without telling us.
+      const win = BrowserWindow.fromWebContents(event.sender);
+      if (win) {
+        win.once("closed", () => {
+          const entry = cameraConsumers.get(id);
+          if (entry) {
+            cameraConsumers.delete(id);
+            void entry.release().catch(() => undefined);
+          }
+        });
+      }
+      return { consumerId: id, vehicleId: req.vehicleId };
+    }
+  );
+
+  ipcMain.handle(IPC.vehicle.cameraStreamClose, async (_e, consumerIdArg: string) => {
+    const entry = cameraConsumers.get(consumerIdArg);
+    if (!entry) return { closed: false };
+    cameraConsumers.delete(consumerIdArg);
+    await entry.release();
+    return { closed: true };
+  });
+
+  ipcMain.handle(
+    IPC.vehicle.cameraSnapshot,
+    async (_e, req: VehicleCameraSnapshotRequest): Promise<VehicleCameraSnapshotResponse> => {
+      const vehicle = registry.get(req.vehicleId);
+      if (!vehicle) return { ok: false, error: `no vehicle ${req.vehicleId}` };
+      if (!vehicle.camera) {
+        return { ok: false, error: "vehicle has no camera sidecar configured" };
+      }
+      const timeoutMs = Math.max(100, req.timeoutMs ?? 8000);
+
+      // Preferred path: the renderer already has a stream open. Reuse it.
+      const existing = cameraStream.peek(vehicle.id);
+      if (existing) {
+        const handle = cameraStream.acquire(vehicle);
+        if (!handle) {
+          return { ok: false, error: "failed to acquire camera stream handle" };
+        }
+        try {
+          const frame = await handle.waitForFirstFrame(timeoutMs);
+          return {
+            ok: true,
+            base64: Buffer.from(frame.bytes).toString("base64"),
+            bytes: frame.bytes.length,
+            contentType: frame.contentType,
+            capturedAt: frame.capturedAt,
+            source: "cache",
+          };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        } finally {
+          await handle.release();
+        }
+      }
+
+      // Fallback: nothing's holding the stream right now (no Drive view
+      // open). Hit /capture directly. Same code path that the standalone
+      // CLI uses when no main process is around.
+      const base = vehicle.camera.baseUrl.replace(/\/$/, "");
+      const path = vehicle.camera.snapshotPath ?? "/capture";
+      const url = `${base}${path}`;
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, { method: "GET", signal: ac.signal });
+        if (!res.ok) {
+          return { ok: false, error: `camera returned HTTP ${res.status} at ${url}` };
+        }
+        const contentType = res.headers.get("content-type") ?? "image/jpeg";
+        const buf = Buffer.from(await res.arrayBuffer());
+        return {
+          ok: true,
+          base64: buf.toString("base64"),
+          bytes: buf.length,
+          contentType,
+          capturedAt: Date.now(),
+          source: "direct",
+        };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+  );
 
   ipcMain.handle(IPC.vehicle.cmd, async (_e, req: VehicleCmdRequest) => {
     const vehicle = registry.get(req.vehicleId);

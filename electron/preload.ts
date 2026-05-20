@@ -17,6 +17,9 @@ const CH = {
   vehicleSetDrive: "vehicle:set-drive",
   vehicleSetWifi: "vehicle:set-wifi",
   vehicleSetFlashConfig: "vehicle:set-flash-config",
+  vehicleCameraStreamOpen: "vehicle:camera-stream-open",
+  vehicleCameraStreamClose: "vehicle:camera-stream-close",
+  vehicleCameraSnapshot: "vehicle:camera-snapshot",
   vehicleCmd: "vehicle:cmd",
   vehicleStop: "vehicle:stop",
   vehicleStreamStateOpen: "vehicle:stream-state-open",
@@ -47,6 +50,12 @@ const api = {
     setDrive: (req: unknown) => ipcRenderer.invoke(CH.vehicleSetDrive, req),
     setWifi: (req: unknown) => ipcRenderer.invoke(CH.vehicleSetWifi, req),
     setFlashConfig: (req: unknown) => ipcRenderer.invoke(CH.vehicleSetFlashConfig, req),
+    cameraStreamOpen: (req: unknown) =>
+      ipcRenderer.invoke(CH.vehicleCameraStreamOpen, req),
+    cameraStreamClose: (consumerId: unknown) =>
+      ipcRenderer.invoke(CH.vehicleCameraStreamClose, consumerId),
+    cameraSnapshot: (req: unknown) =>
+      ipcRenderer.invoke(CH.vehicleCameraSnapshot, req),
     cmd: (req: unknown) => ipcRenderer.invoke(CH.vehicleCmd, req),
     stop: (req: unknown) => ipcRenderer.invoke(CH.vehicleStop, req),
     streamState: async (req: unknown, onEvent: (e: unknown) => void) => {

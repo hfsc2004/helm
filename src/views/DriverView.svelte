@@ -1,7 +1,7 @@
 <script lang="ts">
   import { fleet } from "../stores/vehicles";
   import StopButton from "../components/StopButton.svelte";
-  import Dpad from "../components/Dpad.svelte";
+  import Numpad from "../components/Numpad.svelte";
   import StateReadouts from "../components/StateReadouts.svelte";
   import IntentBar from "../components/IntentBar.svelte";
   import CameraFeed from "../components/CameraFeed.svelte";
@@ -28,7 +28,7 @@
         </p>
       </section>
     {:else}
-      <Dpad />
+      <Numpad />
       <StateReadouts />
       <ActivityLog />
     {/if}

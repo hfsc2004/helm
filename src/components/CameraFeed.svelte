@@ -20,13 +20,14 @@
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let consumerId: string | null = null;
   let openVehicleId: string | null = null;
-  let imgError = false;
-  let errorMessage: string | null = null;
   let lastCapturedAt = 0;
-  // Only show the error overlay when poll failures persist — a single
-  // dropped frame is normal and shouldn't paint text across the image.
+  // Track how long the feed has been stuck on the same frame. We never
+  // paint the underlying error text on top of the live image (that was
+  // too noisy when the AP roamed channels), but a tiny "STALE" badge
+  // appears in the corner so the user knows it isn't fresh.
+  let stale = false;
   let consecutiveErrors = 0;
-  const ERROR_OVERLAY_THRESHOLD = 4; // ~250ms at the 66ms poll cadence
+  const STALE_THRESHOLD = 30; // ~2s at the 66ms poll cadence
 
   $: selected = $fleet.vehicles.find((v) => v.id === $fleet.selectedId) ?? null;
   $: hasCamera = !!selected?.camera;
@@ -45,37 +46,31 @@
   }
 
   async function openStream(vehicleId: string): Promise<void> {
-    imgError = false;
-    errorMessage = null;
     consecutiveErrors = 0;
+    stale = false;
     try {
       const handle = await window.helm.vehicle.cameraStreamOpen({ vehicleId });
       consumerId = handle.consumerId;
       openVehicleId = vehicleId;
-      // Kick the first snapshot pull with a generous timeout so the UI
-      // doesn't show "Camera unreachable" while the upstream connection is
-      // still negotiating its first multipart boundary.
+      // First pull gets a generous timeout so the UI doesn't blink stale
+      // while the upstream connection is still negotiating.
       await pollOnce(FIRST_FRAME_TIMEOUT_MS);
       pollTimer = setInterval(() => void pollOnce(2000), POLL_INTERVAL_MS);
-    } catch (err) {
-      registerError(err instanceof Error ? err.message : String(err));
-      await teardown();
+    } catch {
+      // Swallowed — the worst we do visually is keep showing the last
+      // good frame with the STALE badge. The teardown happens on unmount.
     }
   }
 
-  function registerError(msg: string): void {
+  function registerError(): void {
     consecutiveErrors++;
-    if (consecutiveErrors >= ERROR_OVERLAY_THRESHOLD) {
-      imgError = true;
-      errorMessage = msg;
-    }
+    if (consecutiveErrors >= STALE_THRESHOLD) stale = true;
   }
 
   function clearError(): void {
-    if (consecutiveErrors > 0 || imgError) {
+    if (consecutiveErrors > 0 || stale) {
       consecutiveErrors = 0;
-      imgError = false;
-      errorMessage = null;
+      stale = false;
     }
   }
 
@@ -87,7 +82,7 @@
         timeoutMs,
       });
       if (!res.ok || !res.base64) {
-        registerError(res.error ?? "no frame");
+        registerError();
         return;
       }
       // Skip if this is the same frame we already showed.
@@ -102,8 +97,8 @@
       if (imgEl) imgEl.src = url;
       if (previous) URL.revokeObjectURL(previous);
       clearError();
-    } catch (err) {
-      registerError(err instanceof Error ? err.message : String(err));
+    } catch {
+      registerError();
     }
   }
 
@@ -146,10 +141,7 @@
   <div class="wrap">
     <!-- svelte-ignore a11y-missing-attribute -->
     <img bind:this={imgEl} alt="Vehicle camera" />
-    <div class="label">CAM · LIVE</div>
-    {#if imgError && errorMessage}
-      <div class="error">{errorMessage}</div>
-    {/if}
+    <div class="label" class:stale>{stale ? "CAM · STALE" : "CAM · LIVE"}</div>
   </div>
 {:else}
   <div class="placeholder">
@@ -190,18 +182,9 @@
     border-radius: 4px;
     letter-spacing: 0.05em;
   }
-  .error {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
+  .label.stale {
     color: var(--danger, #f85149);
-    background: rgba(0, 0, 0, 0.6);
-    padding: 0.5rem 0.75rem;
-    border-radius: 6px;
-    font-size: 0.85rem;
-    max-width: 80%;
-    text-align: center;
+    border: 1px solid var(--danger, #f85149);
   }
   .placeholder {
     text-align: center;

@@ -4,6 +4,7 @@
   import StopButton from "../components/StopButton.svelte";
   import Numpad from "../components/Numpad.svelte";
   import Gamepad from "../components/Gamepad.svelte";
+  import SpeedSlider from "../components/SpeedSlider.svelte";
   import StateReadouts from "../components/StateReadouts.svelte";
   import IntentBar from "../components/IntentBar.svelte";
   import CameraFeed from "../components/CameraFeed.svelte";
@@ -35,6 +36,7 @@
       {:else}
         <Numpad mode={$inputMode} />
       {/if}
+      <SpeedSlider />
       <StateReadouts />
       <ActivityLog />
     {/if}

@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
+  import { get } from "svelte/store";
   import { fleet } from "../stores/vehicles";
   import { activity } from "../stores/activity";
+  import { driveSpeed } from "../stores/driveSpeed";
   import type { SkidSteerAction } from "@shared/vehicle-contract";
 
   // Layout & semantics mirror core-ce's Gateway Card Numpad.
@@ -30,8 +32,6 @@
 
   const HOLD_PULSE_MS = 180;       // matches core-ce; keeps the firmware deadman alive
   const CW_180_MS = 820;           // core-ce ESP32_NUMPAD_CW_180_MS
-  const DRIVE_SPEED = 170;         // safe default; vehicle.drive?.speed wins if set
-  const TURN_MAGNITUDE = 160;
 
   type Direction = "forward" | "reverse" | "left" | "right";
 
@@ -44,18 +44,19 @@
   // doesn't re-trigger startDrive on every event.
   const held = new Set<string>();
 
-  $: speed = $fleet.vehicles.find((v) => v.id === $fleet.selectedId)?.drive?.speed ?? DRIVE_SPEED;
-
   function actionFor(direction: Direction): SkidSteerAction {
+    // Read the slider value at command time (not on subscribe) so adjusting
+    // the slider mid-hold takes effect on the next pulse.
+    const speed = get(driveSpeed);
     switch (direction) {
       case "forward":
         return { kind: "fwd", speed };
       case "reverse":
         return { kind: "rev", speed };
       case "left":
-        return { kind: "turn", signed: -TURN_MAGNITUDE };
+        return { kind: "turn", signed: -speed };
       case "right":
-        return { kind: "turn", signed: TURN_MAGNITUDE };
+        return { kind: "turn", signed: speed };
     }
   }
 
@@ -151,7 +152,7 @@
     // Make sure no hold is active first.
     stopPulse();
     await send(
-      { kind: "turn", signed: TURN_MAGNITUDE, durationMs: CW_180_MS },
+      { kind: "turn", signed: get(driveSpeed), durationMs: CW_180_MS },
       true
     );
   }

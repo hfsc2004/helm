@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
+  import { get } from "svelte/store";
   import { fleet } from "../stores/vehicles";
   import { activity } from "../stores/activity";
+  import { driveSpeed } from "../stores/driveSpeed";
   import type { SkidSteerAction } from "@shared/vehicle-contract";
 
   /**
@@ -18,7 +20,6 @@
 
   const DEADZONE = 0.18;
   const SEND_INTERVAL_MS = 150;
-  const MAX_PWM = 255;
   const CW_180_MS = 820;
 
   let connected: { index: number; id: string } | null = null;
@@ -92,9 +93,10 @@
     const max = Math.max(Math.abs(left), Math.abs(right), 1);
     left /= max;
     right /= max;
+    const cap = get(driveSpeed); // slider sets the ceiling for stick output
     return {
-      left: Math.round(left * MAX_PWM),
-      right: Math.round(right * MAX_PWM),
+      left: Math.round(left * cap),
+      right: Math.round(right * cap),
     };
   }
 
@@ -127,9 +129,9 @@
       void send({ kind: "stop" }, true);
     }
     if (north && !prevNorth) {
-      // CW 180 — fire-and-forget timed turn.
+      // CW 180 — fire-and-forget timed turn using the slider's speed.
       void send(
-        { kind: "turn", signed: 200, durationMs: CW_180_MS },
+        { kind: "turn", signed: get(driveSpeed), durationMs: CW_180_MS },
         true
       );
     }

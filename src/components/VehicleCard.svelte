@@ -1,7 +1,8 @@
 <script lang="ts">
   import { fleet } from "../stores/vehicles";
   import { activeView } from "../stores/view";
-  import type { Vehicle } from "@shared/vehicle-contract";
+  import type { DriveMapTarget, Vehicle } from "@shared/vehicle-contract";
+  import { DRIVE_TUNING_DEFAULTS } from "@shared/vehicle-contract";
 
   export let vehicle: Vehicle;
 
@@ -16,6 +17,74 @@
   $: cameraDraft = vehicle.camera?.baseUrl ?? "";
   $: hasAudio = !!vehicle.audio;
   $: audioDraft = vehicle.audio?.baseUrl ?? "";
+
+  // ---------------- Drive tuning ----------------
+  // Edited locally; flushed to the registry via fleet.setDrive on Save.
+  let tuningOpen = false;
+  let driveSpeed = vehicle.drive?.speed ?? DRIVE_TUNING_DEFAULTS.speed;
+  let driveSwap = vehicle.drive?.swapSides ?? DRIVE_TUNING_DEFAULTS.swapSides;
+  let driveInvertLeft = vehicle.drive?.invertLeft ?? DRIVE_TUNING_DEFAULTS.invertLeft;
+  let driveInvertRight = vehicle.drive?.invertRight ?? DRIVE_TUNING_DEFAULTS.invertRight;
+  let mapForward: DriveMapTarget =
+    vehicle.drive?.map.forward ?? DRIVE_TUNING_DEFAULTS.map.forward;
+  let mapReverse: DriveMapTarget =
+    vehicle.drive?.map.reverse ?? DRIVE_TUNING_DEFAULTS.map.reverse;
+  let mapLeft: DriveMapTarget =
+    vehicle.drive?.map.left ?? DRIVE_TUNING_DEFAULTS.map.left;
+  let mapRight: DriveMapTarget =
+    vehicle.drive?.map.right ?? DRIVE_TUNING_DEFAULTS.map.right;
+
+  // Re-sync local state when the vehicle prop changes (e.g. after Save).
+  $: if (vehicle.drive) {
+    driveSpeed = vehicle.drive.speed;
+    driveSwap = vehicle.drive.swapSides;
+    driveInvertLeft = vehicle.drive.invertLeft;
+    driveInvertRight = vehicle.drive.invertRight;
+    mapForward = vehicle.drive.map.forward;
+    mapReverse = vehicle.drive.map.reverse;
+    mapLeft = vehicle.drive.map.left;
+    mapRight = vehicle.drive.map.right;
+  }
+
+  const MAP_OPTIONS: Array<{ value: DriveMapTarget; label: string }> = [
+    { value: "fwd", label: "Forward" },
+    { value: "rev", label: "Reverse" },
+    { value: "turn_left", label: "Turn left" },
+    { value: "turn_right", label: "Turn right" },
+    { value: "stop", label: "Stop" },
+  ];
+
+  async function saveDriveTuning() {
+    busy = true;
+    error = null;
+    const res = await fleet.setDrive(vehicle.id, {
+      speed: Number(driveSpeed),
+      swapSides: driveSwap,
+      invertLeft: driveInvertLeft,
+      invertRight: driveInvertRight,
+      map: {
+        forward: mapForward,
+        reverse: mapReverse,
+        left: mapLeft,
+        right: mapRight,
+      },
+    });
+    busy = false;
+    if (!res.ok) {
+      error = res.error ?? "Failed to save drive tuning.";
+    }
+  }
+
+  async function resetDriveTuning() {
+    if (!confirm("Reset drive tuning to defaults?")) return;
+    busy = true;
+    error = null;
+    const res = await fleet.setDrive(vehicle.id, null);
+    busy = false;
+    if (!res.ok) {
+      error = res.error ?? "Failed to reset drive tuning.";
+    }
+  }
 
   async function saveCamera() {
     const url = cameraDraft.trim();
@@ -216,6 +285,84 @@
     </div>
   </section>
 
+  <section class="tuning">
+    <button
+      class="disclosure"
+      type="button"
+      on:click={() => (tuningOpen = !tuningOpen)}
+    >
+      {tuningOpen ? "▾" : "▸"} Drive tuning
+      {#if vehicle.drive}<span class="badge">customized</span>{/if}
+    </button>
+
+    {#if tuningOpen}
+      <div class="tuning-body">
+        <p class="muted small">
+          Rotates intents from the driver / planner before they hit the wire.
+          Use this when the chassis is wired 90/180° rotated, without re-flashing.
+        </p>
+
+        <div class="map-grid">
+          <label>
+            <span class="lbl">Forward intent →</span>
+            <select bind:value={mapForward} disabled={busy}>
+              {#each MAP_OPTIONS as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
+            </select>
+          </label>
+          <label>
+            <span class="lbl">Reverse intent →</span>
+            <select bind:value={mapReverse} disabled={busy}>
+              {#each MAP_OPTIONS as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
+            </select>
+          </label>
+          <label>
+            <span class="lbl">Left intent →</span>
+            <select bind:value={mapLeft} disabled={busy}>
+              {#each MAP_OPTIONS as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
+            </select>
+          </label>
+          <label>
+            <span class="lbl">Right intent →</span>
+            <select bind:value={mapRight} disabled={busy}>
+              {#each MAP_OPTIONS as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
+            </select>
+          </label>
+        </div>
+
+        <div class="tuning-row">
+          <label>
+            <span class="lbl">Default speed (0..255)</span>
+            <input type="number" min="0" max="255" bind:value={driveSpeed} disabled={busy} />
+          </label>
+        </div>
+
+        <label class="checkbox">
+          <input type="checkbox" bind:checked={driveSwap} disabled={busy} />
+          Swap left/right motor outputs (tank only)
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" bind:checked={driveInvertLeft} disabled={busy} />
+          Invert left motor (tank only)
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" bind:checked={driveInvertRight} disabled={busy} />
+          Invert right motor (tank only)
+        </label>
+
+        <div class="tuning-actions">
+          <button class="primary-sm" on:click={saveDriveTuning} disabled={busy}>
+            Save tuning
+          </button>
+          {#if vehicle.drive}
+            <button class="link" on:click={resetDriveTuning} disabled={busy}>
+              Reset to defaults
+            </button>
+          {/if}
+        </div>
+      </div>
+    {/if}
+  </section>
+
   {#if error}
     <p class="error">{error}</p>
   {/if}
@@ -392,5 +539,90 @@
     padding-top: 0.6rem;
     display: flex;
     justify-content: flex-end;
+  }
+
+  .tuning {
+    border-top: 1px solid var(--border);
+    padding-top: 0.85rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+  }
+  .disclosure {
+    background: transparent;
+    border: none;
+    color: var(--fg);
+    font: inherit;
+    font-size: 0.8rem;
+    text-align: left;
+    cursor: pointer;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .badge {
+    background: var(--surface-2, #1c232c);
+    color: var(--accent, #58a6ff);
+    border: 1px solid var(--accent, #58a6ff);
+    border-radius: 4px;
+    padding: 0.05rem 0.4rem;
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .tuning-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.75rem 0.85rem;
+  }
+  .map-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem 0.85rem;
+  }
+  .map-grid label,
+  .tuning-row label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  .tuning-body .lbl {
+    color: var(--muted);
+    font-size: 0.7rem;
+  }
+  .tuning-body input[type="number"],
+  .tuning-body select {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    padding: 0.3rem 0.5rem;
+    border-radius: 4px;
+    font: inherit;
+    font-size: 0.8rem;
+  }
+  .tuning-body input:focus,
+  .tuning-body select:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .checkbox {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.8rem;
+  }
+  .tuning-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+    margin-top: 0.35rem;
+  }
+  .small {
+    font-size: 0.75rem;
   }
 </style>

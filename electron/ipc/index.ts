@@ -14,8 +14,15 @@ import type {
   VehicleRemoveRequest,
   VehicleSetAudioRequest,
   VehicleSetCameraRequest,
+  VehicleSetDriveRequest,
+  VehicleSetFlashConfigRequest,
+  VehicleSetWifiRequest,
   VehicleStopRequest,
 } from "../../shared/ipc-channels.js";
+import type {
+  DriveFlashConfig,
+  VideoFlashConfig,
+} from "../../shared/vehicle-contract.js";
 
 import * as registry from "../../core/vehicles/registry.js";
 import * as adapter from "../../core/vehicles/ground-skidsteer.js";
@@ -85,6 +92,30 @@ export function registerIpcHandlers(opts: { version: string }): void {
 
   ipcMain.handle(IPC.vehicle.setAudio, async (_e, req: VehicleSetAudioRequest) => {
     const updated = registry.setAudio(req.vehicleId, req.audio);
+    return updated
+      ? { ok: true, vehicle: updated }
+      : { ok: false, error: `no vehicle ${req.vehicleId}` };
+  });
+
+  ipcMain.handle(IPC.vehicle.setDrive, async (_e, req: VehicleSetDriveRequest) => {
+    const updated = registry.setDrive(req.vehicleId, req.drive);
+    return updated
+      ? { ok: true, vehicle: updated }
+      : { ok: false, error: `no vehicle ${req.vehicleId}` };
+  });
+
+  ipcMain.handle(IPC.vehicle.setWifi, async (_e, req: VehicleSetWifiRequest) => {
+    const updated = registry.setWifi(req.vehicleId, req.board, req.wifi);
+    return updated
+      ? { ok: true, vehicle: updated }
+      : { ok: false, error: `no vehicle ${req.vehicleId}` };
+  });
+
+  ipcMain.handle(IPC.vehicle.setFlashConfig, async (_e, req: VehicleSetFlashConfigRequest) => {
+    const updated =
+      req.board === "drive"
+        ? registry.setFlash(req.vehicleId, "drive", req.flash as DriveFlashConfig | null)
+        : registry.setFlash(req.vehicleId, "video", req.flash as VideoFlashConfig | null);
     return updated
       ? { ok: true, vehicle: updated }
       : { ok: false, error: `no vehicle ${req.vehicleId}` };

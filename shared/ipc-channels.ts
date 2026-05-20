@@ -10,7 +10,15 @@
  *   are sessions and register with BMOC for clean shutdown.
  */
 
-import type { Vehicle, SkidSteerAction } from "./vehicle-contract.js";
+import type {
+  BoardRole,
+  DriveFlashConfig,
+  DriveTuning,
+  SkidSteerAction,
+  Vehicle,
+  VideoFlashConfig,
+  WifiBoardConfig,
+} from "./vehicle-contract.js";
 import type { OllamaStatus } from "./llm.js";
 
 // ---------------------------------------------------------------------------
@@ -186,12 +194,31 @@ export interface VehicleRemoveRequest {
 
 export interface VehicleSetCameraRequest {
   vehicleId: string;
-  camera: { baseUrl: string; streamPath?: string; snapshotPath?: string } | null;
+  camera:
+    | { baseUrl: string; streamPath?: string; snapshotPath?: string; flashStatusPath?: string }
+    | null;
 }
 
 export interface VehicleSetAudioRequest {
   vehicleId: string;
   audio: { baseUrl: string; streamPath?: string } | null;
+}
+
+export interface VehicleSetDriveRequest {
+  vehicleId: string;
+  drive: Partial<DriveTuning> | null;
+}
+
+export interface VehicleSetWifiRequest {
+  vehicleId: string;
+  board: BoardRole;
+  wifi: WifiBoardConfig | null;
+}
+
+export interface VehicleSetFlashConfigRequest {
+  vehicleId: string;
+  board: BoardRole;
+  flash: DriveFlashConfig | VideoFlashConfig | null;
 }
 
 export interface VehicleMutationResponse {
@@ -210,6 +237,9 @@ export interface HelmAPI {
     remove(req: VehicleRemoveRequest): Promise<VehicleMutationResponse>;
     setCamera(req: VehicleSetCameraRequest): Promise<VehicleMutationResponse>;
     setAudio(req: VehicleSetAudioRequest): Promise<VehicleMutationResponse>;
+    setDrive(req: VehicleSetDriveRequest): Promise<VehicleMutationResponse>;
+    setWifi(req: VehicleSetWifiRequest): Promise<VehicleMutationResponse>;
+    setFlashConfig(req: VehicleSetFlashConfigRequest): Promise<VehicleMutationResponse>;
     cmd(req: VehicleCmdRequest): Promise<VehicleCmdResponse>;
     stop(req: VehicleStopRequest): Promise<VehicleCmdResponse>;
     streamState(req: StateStreamRequest, onEvent: (e: StateStreamEvent) => void): Promise<{
@@ -259,6 +289,9 @@ export const IPC = {
     remove: "vehicle:remove",
     setCamera: "vehicle:set-camera",
     setAudio: "vehicle:set-audio",
+    setDrive: "vehicle:set-drive",
+    setWifi: "vehicle:set-wifi",
+    setFlashConfig: "vehicle:set-flash-config",
     cmd: "vehicle:cmd",
     stop: "vehicle:stop",
     streamStateOpen: "vehicle:stream-state-open",

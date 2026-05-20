@@ -1,4 +1,15 @@
+import { join } from "node:path";
+
 import type { LoadedTemplate, TemplateVar } from "./templates.js";
+
+/**
+ * Generator-kind templates expose a builder module that turns the resolved
+ * variable map into the full sketch source. The shape is intentionally narrow
+ * so a builder can stay a thin pure function.
+ */
+export interface SketchBuilder {
+  build(resolved: Record<string, VarValue>): string;
+}
 
 /**
  * Validate user-supplied template variables against the manifest, then
@@ -146,6 +157,57 @@ export function renderSketch(
   const validated = validateAndResolve(template.manifest.vars, provided);
   if ("errors" in validated) {
     return { ok: false, errors: validated.errors };
+  }
+
+  const kind = template.manifest.kind ?? "static";
+  if (kind === "generator") {
+    const builderPath = join(template.dir, "builder.js");
+    let builder: SketchBuilder;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const mod = require(builderPath) as Partial<SketchBuilder> | { default?: SketchBuilder };
+      const candidate =
+        typeof (mod as SketchBuilder).build === "function"
+          ? (mod as SketchBuilder)
+          : ((mod as { default?: SketchBuilder }).default ?? null);
+      if (!candidate || typeof candidate.build !== "function") {
+        return {
+          ok: false,
+          errors: [`generator template ${template.manifest.id} has no build() export`],
+        };
+      }
+      builder = candidate;
+    } catch (err) {
+      return {
+        ok: false,
+        errors: [
+          `failed to load generator for ${template.manifest.id}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        ],
+      };
+    }
+
+    let sketch: string;
+    try {
+      sketch = builder.build(validated.resolved);
+    } catch (err) {
+      return {
+        ok: false,
+        errors: [
+          `generator threw for ${template.manifest.id}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        ],
+      };
+    }
+    if (typeof sketch !== "string" || sketch.length === 0) {
+      return {
+        ok: false,
+        errors: [`generator returned empty sketch for ${template.manifest.id}`],
+      };
+    }
+    return { ok: true, sketch, resolved: validated.resolved };
   }
 
   const { rendered, missing } = substitute(template.sketchSource, validated.resolved);

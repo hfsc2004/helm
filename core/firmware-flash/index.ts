@@ -13,11 +13,12 @@
 export {
   listTemplates,
   loadTemplate,
+  type TemplateKind,
   type TemplateManifest,
   type TemplateVar,
   type LoadedTemplate,
 } from "./templates.js";
-export { renderSketch, type VarValue } from "./render.js";
+export { renderSketch, type SketchBuilder, type VarValue } from "./render.js";
 export {
   flash,
   type FlashEvent,

@@ -13,6 +13,15 @@ import { dirname, join } from "node:path";
 
 export type VarType = "string" | "secret" | "number" | "boolean";
 
+/**
+ * "static"    — directory contains sketch.ino with {{placeholders}}.
+ * "generator" — directory contains builder.js (or builder.ts, in source mode)
+ *               that exports `build(vars) → string`. Used when a sketch is too
+ *               structural for placeholder substitution (e.g. ESP32-S3 camera
+ *               with conditional pin profiles).
+ */
+export type TemplateKind = "static" | "generator";
+
 export interface TemplateVar {
   key: string;
   type: VarType;
@@ -25,6 +34,7 @@ export interface TemplateManifest {
   id: string;
   name: string;
   description?: string;
+  kind?: TemplateKind;
   target: string;
   fqbn: string;
   core: string;
@@ -37,7 +47,7 @@ export interface LoadedTemplate {
   manifest: TemplateManifest;
   /** Absolute path to the template directory. */
   dir: string;
-  /** Raw sketch source with {{placeholders}}. */
+  /** Raw sketch source with {{placeholders}}. Empty for generator templates. */
   sketchSource: string;
 }
 
@@ -81,9 +91,22 @@ export function loadTemplate(id: string): LoadedTemplate | null {
   const dir = join(root, id);
   if (!existsSync(dir) || !statSync(dir).isDirectory()) return null;
   const manifestPath = join(dir, "template.json");
-  const sketchPath = join(dir, "sketch.ino");
-  if (!existsSync(manifestPath) || !existsSync(sketchPath)) return null;
+  if (!existsSync(manifestPath)) return null;
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as TemplateManifest;
-  const sketchSource = readFileSync(sketchPath, "utf8");
-  return { manifest, dir, sketchSource };
+  const kind: TemplateKind = manifest.kind ?? "static";
+
+  if (kind === "static") {
+    const sketchPath = join(dir, "sketch.ino");
+    if (!existsSync(sketchPath)) return null;
+    const sketchSource = readFileSync(sketchPath, "utf8");
+    return { manifest, dir, sketchSource };
+  }
+
+  // Generator templates load their sketch source lazily via renderSketch().
+  // Sanity-check that the builder file exists at template load so a missing
+  // builder fails fast rather than mid-flash. The .js form is what the build
+  // step emits; in tsx (dev) mode the loader resolves .js to .ts.
+  const builderJs = join(dir, "builder.js");
+  if (!existsSync(builderJs)) return null;
+  return { manifest, dir, sketchSource: "" };
 }

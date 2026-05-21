@@ -55,11 +55,36 @@ const int HTTP_PORT = 8080;
 const unsigned long DEADMAN_MS = 800; // stop if no command within this window
 const int MAX_SPEED = 200;
 
+// ===== IR distance sensors (Sharp GP2Y0A21YK0F via LM358 buffer) =====
+// All four channels are on ADC1 so they coexist with Wi-Fi (ADC2 is
+// shared with the radio and unreliable while connected).
+// The PCB buffers each Sharp output through its own op-amp, so the
+// ESP32 sees a clean 0–3.3V signal; we run ADC at 11dB attenuation
+// to map that range into the full 0–4095 count space.
+//
+// We publish raw ADC counts on /telemetry. The voltage→distance curve
+// for the GP2Y0A21 is non-linear and has a confusing "dead zone" below
+// ~8cm where the reading folds back. The conversion is done on the
+// Helm side so it can be tuned without re-flashing.
+const int IR_PIN_FL = 34; // front-left  (~45° W of center)
+const int IR_PIN_FC = 32; // front-center (0°)
+const int IR_PIN_FR = 33; // front-right (~45° E of center)
+const int IR_PIN_RR = 35; // rear        (0° S)
+const int IR_SAMPLES = 4; // tiny rolling average — the Sharps are jittery
+
 WebServer server(HTTP_PORT);
 
 volatile int gLeftCmd = 0;   // -255..255
 volatile int gRightCmd = 0;  // -255..255
 volatile unsigned long gLastCmdMs = 0;
+
+int readIrAveraged(int pin) {
+  uint32_t sum = 0;
+  for (int i = 0; i < IR_SAMPLES; i++) {
+    sum += analogRead(pin);
+  }
+  return (int)(sum / IR_SAMPLES);
+}
 
 IPAddress cidrToMask(int cidr) {
   int bits = cidr;
@@ -154,6 +179,10 @@ void handleHealth() {
 
 void handleTelemetry() {
   unsigned long age = millis() - gLastCmdMs;
+  int irFL = readIrAveraged(IR_PIN_FL);
+  int irFC = readIrAveraged(IR_PIN_FC);
+  int irFR = readIrAveraged(IR_PIN_FR);
+  int irRR = readIrAveraged(IR_PIN_RR);
   String json = "{";
   json += "\"left\":" + String(gLeftCmd) + ",";
   json += "\"right\":" + String(gRightCmd) + ",";
@@ -162,7 +191,11 @@ void handleTelemetry() {
   json += "\"wifiRssi\":" + String(WiFi.RSSI()) + ",";
   json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
   json += "\"gateway\":\"" + WiFi.gatewayIP().toString() + "\",";
-  json += "\"subnet\":\"" + WiFi.subnetMask().toString() + "\"";
+  json += "\"subnet\":\"" + WiFi.subnetMask().toString() + "\",";
+  json += "\"irFrontLeft\":" + String(irFL) + ",";
+  json += "\"irFrontCenter\":" + String(irFC) + ",";
+  json += "\"irFrontRight\":" + String(irFR) + ",";
+  json += "\"irRear\":" + String(irRR);
   json += "}";
   server.send(200, "application/json", json);
 }
@@ -312,6 +345,15 @@ void setup() {
 
   ledcAttach(ENA, MOTOR_PWM_FREQ, MOTOR_PWM_RESOLUTION);
   ledcAttach(ENB, MOTOR_PWM_FREQ, MOTOR_PWM_RESOLUTION);
+
+  // IR distance ADC channels — all on ADC1 so they coexist with Wi-Fi.
+  // 11dB attenuation maps the buffered 0–3.3V range to the full
+  // 0–4095 count space (the default 0dB clips around ~1.1V).
+  analogReadResolution(12);
+  analogSetPinAttenuation(IR_PIN_FL, ADC_11db);
+  analogSetPinAttenuation(IR_PIN_FC, ADC_11db);
+  analogSetPinAttenuation(IR_PIN_FR, ADC_11db);
+  analogSetPinAttenuation(IR_PIN_RR, ADC_11db);
 
   stopMotors();
 

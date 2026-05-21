@@ -2,6 +2,12 @@
   import { onMount } from "svelte";
   import { fleet, vehicleState } from "../stores/vehicles";
 
+  // VehiclePicker lives in the global header — it shouldn't auto-start
+  // the telemetry stream just because the app opened. Stream lifecycle
+  // belongs to whichever view actually needs state readouts (the
+  // Driver view, today). Picking a different vehicle here, while a
+  // stream IS already running, swaps it over.
+
   onMount(async () => {
     await fleet.refresh();
   });
@@ -9,7 +15,13 @@
   $: selected = $fleet.vehicles.find((v) => v.id === $fleet.selectedId) ?? null;
   $: reachable = $vehicleState.reachable;
 
-  $: if (selected && $vehicleState.vehicleId !== selected.id) {
+  // Only swap the stream's target vehicle if a stream is already active.
+  // Don't open one just because a vehicle is selected.
+  $: if (
+    selected &&
+    $vehicleState.vehicleId !== null &&
+    $vehicleState.vehicleId !== selected.id
+  ) {
     void vehicleState.start(selected.id);
   }
 

@@ -166,11 +166,44 @@ async function httpGet(
   opts: RequestOptions = {}
 ): Promise<{ status: number; body: string }> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), opts.timeoutMs ?? 5000);
+  const timeoutMs = opts.timeoutMs ?? 5000;
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   try {
-    const res = await fetch(url, { method: "GET", signal: controller.signal });
+    // Force a fresh TCP connection per request and tell the firmware to
+    // close it immediately. ESP32's WebServer library only has room for a
+    // few concurrent sockets and gets wedged when keep-alive idle ones
+    // pile up. We pay a 3-way-handshake per request as a result, but the
+    // firmware stays responsive.
+    const res = await fetch(url, {
+      method: "GET",
+      signal: controller.signal,
+      headers: { Connection: "close" },
+      // Node-only: disable keep-alive via undici. The renderer Fetch API
+      // ignores `keepalive: false` (it's a different field there), so the
+      // header above is what actually matters in both environments.
+      keepalive: false,
+    });
     const body = await res.text();
     return { status: res.status, body };
+  } catch (err) {
+    // Translate Node's raw "This operation was aborted" into something a
+    // user can actually act on. Show host:port and the timeout.
+    if (timedOut) {
+      const host = (() => {
+        try {
+          const u = new URL(url);
+          return `${u.hostname}:${u.port || "80"}`;
+        } catch {
+          return url;
+        }
+      })();
+      throw new Error(`drive board did not respond within ${timeoutMs}ms (${host})`);
+    }
+    throw err;
   } finally {
     clearTimeout(timeout);
   }

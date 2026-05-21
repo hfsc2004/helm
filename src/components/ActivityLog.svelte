@@ -18,7 +18,7 @@
           <span class="ts">{fmtTime(e.ts)}</span>
           <span class="who who-{e.who}">{e.who}</span>
           <span class="kind kind-{e.kind}">{e.kind}</span>
-          <span class="msg">{e.message}</span>
+          <span class="msg">{#if e.count && e.count > 1}<span class="count">×{e.count}</span>{/if}{e.message}</span>
         </div>
       {/each}
     </div>
@@ -76,9 +76,18 @@
   .kind-error { color: var(--danger, #f85149); }
   .msg {
     color: var(--fg);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    white-space: pre-wrap;
+  }
+  .count {
+    display: inline-block;
+    margin-right: 0.4rem;
+    padding: 0 0.3rem;
+    border-radius: 3px;
+    background: var(--surface-2, #1c232c);
+    color: var(--muted, #8b949e);
+    font-size: 0.65rem;
   }
   .muted {
     color: var(--muted);

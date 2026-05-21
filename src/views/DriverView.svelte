@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { fleet } from "../stores/vehicles";
+  import { onDestroy } from "svelte";
+  import { fleet, vehicleState } from "../stores/vehicles";
   import { inputMode } from "../stores/inputMode";
   import StopButton from "../components/StopButton.svelte";
   import Numpad from "../components/Numpad.svelte";
@@ -10,6 +11,16 @@
   import CameraFeed from "../components/CameraFeed.svelte";
   import AudioFeed from "../components/AudioFeed.svelte";
   import ActivityLog from "../components/ActivityLog.svelte";
+
+  // Start the telemetry stream only while the Driver view is mounted, and
+  // only against the currently-selected vehicle. Closing this tab tears it
+  // down so an idle Helm-UI never polls /telemetry on the LAN.
+  $: if ($fleet.selectedId && $vehicleState.vehicleId !== $fleet.selectedId) {
+    void vehicleState.start($fleet.selectedId);
+  }
+  onDestroy(() => {
+    void vehicleState.stop();
+  });
 </script>
 
 <div class="layout">

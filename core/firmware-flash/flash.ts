@@ -93,37 +93,87 @@ function stagingDir(id: string): string {
   return join(paths.data, "flash-staging", id);
 }
 
+/**
+ * Translate arduino-cli's terse failure modes into one-line user-readable
+ * causes. Falls back to a sliced stderr when nothing obvious matches.
+ */
+function diagnoseCoreFailure(stderr: string, fallbackPrefix: string): string {
+  const s = stderr.toLowerCase();
+  if (/getaddrinfo|enotfound|econnrefused|network is unreachable|no route to host/.test(s)) {
+    return `${fallbackPrefix}: couldn't reach the Arduino index server — check your internet connection`;
+  }
+  if (/permission denied|eacces|read-?only/.test(s)) {
+    return `${fallbackPrefix}: permission denied writing to the arduino-cli data dir`;
+  }
+  if (/no space left|enospc|disk full/.test(s)) {
+    return `${fallbackPrefix}: out of disk space while installing the board core`;
+  }
+  if (/checksum|verification failed|sha-?256/.test(s)) {
+    return `${fallbackPrefix}: download verification failed (partial install) — re-run to retry`;
+  }
+  return `${fallbackPrefix}: ${stderr.slice(0, 200).trim() || "no stderr output"}`;
+}
+
+/**
+ * Heuristic: does an arduino-cli compile failure look like "the ESP32 core
+ * isn't really installed, even if `core list` showed it"? Triggers an
+ * auto-heal reinstall. Strings copied from arduino-cli's own emissions —
+ * what we saw on the partial-install case.
+ */
+function looksLikeMissingPlatform(stderr: string, core: string): boolean {
+  const s = stderr.toLowerCase();
+  const coreLower = core.toLowerCase();
+  return (
+    s.includes(`platform ${coreLower} not found`) ||
+    s.includes(`${coreLower} not found`) ||
+    s.includes("missing platform") ||
+    s.includes("platform not installed") ||
+    // arduino-cli sometimes emits FQBN-shaped errors instead of core-shaped
+    /fqbn .* not found/.test(s) ||
+    /unknown fqbn/.test(s)
+  );
+}
+
 async function ensureCore(
   bin: string,
   baseArgs: string[],
   env: NodeJS.ProcessEnv,
   core: string,
-  onProgress: ProgressCallback
+  onProgress: ProgressCallback,
+  /** If true, skip the installed-check and force re-install (auto-heal path). */
+  forceReinstall = false
 ): Promise<{ ok: boolean; reason?: string }> {
-  // Check if installed.
-  const check = await runCommandAsync(
-    bin,
-    [...baseArgs, "core", "list", "--format", "json"],
-    { env, timeoutMs: 30000 }
-  );
-  if (check.error || check.status !== 0) {
-    return { ok: false, reason: `arduino-cli core list failed: ${check.stderr.slice(0, 200)}` };
-  }
-  try {
-    const parsed = JSON.parse(check.stdout) as {
-      platforms?: Array<{ id?: string; installed_version?: string }>;
-    };
-    const cores = parsed.platforms ?? [];
-    if (cores.some((c) => c.id === core && c.installed_version)) {
-      return { ok: true };
+  if (!forceReinstall) {
+    // Check if installed.
+    const check = await runCommandAsync(
+      bin,
+      [...baseArgs, "core", "list", "--format", "json"],
+      { env, timeoutMs: 30000 }
+    );
+    if (check.error || check.status !== 0) {
+      return {
+        ok: false,
+        reason: diagnoseCoreFailure(check.stderr, "arduino-cli core list failed"),
+      };
     }
-  } catch {
-    // Older arduino-cli versions returned a different shape; fall through to install.
+    try {
+      const parsed = JSON.parse(check.stdout) as {
+        platforms?: Array<{ id?: string; installed_version?: string }>;
+      };
+      const cores = parsed.platforms ?? [];
+      if (cores.some((c) => c.id === core && c.installed_version)) {
+        return { ok: true };
+      }
+    } catch {
+      // Older arduino-cli versions returned a different shape; fall through to install.
+    }
   }
 
   onProgress({
     stage: "core-install",
-    message: `installing ${core} core (one-time, may take several minutes)`,
+    message: forceReinstall
+      ? `reinstalling ${core} core (auto-heal — last compile reported it missing)`
+      : `installing ${core} core (one-time, may take several minutes)`,
   });
 
   // index update + core install
@@ -137,7 +187,10 @@ async function ensureCore(
     }
   );
   if (update.error || update.status !== 0) {
-    return { ok: false, reason: `core update-index failed: ${update.stderr.slice(0, 200)}` };
+    return {
+      ok: false,
+      reason: diagnoseCoreFailure(update.stderr, "core update-index failed"),
+    };
   }
 
   const install = await runCommandAsync(
@@ -151,7 +204,10 @@ async function ensureCore(
     }
   );
   if (install.error || install.status !== 0) {
-    return { ok: false, reason: `core install ${core} failed: ${install.stderr.slice(0, 200)}` };
+    return {
+      ok: false,
+      reason: diagnoseCoreFailure(install.stderr, `core install ${core} failed`),
+    };
   }
   return { ok: true };
 }
@@ -247,36 +303,79 @@ export async function flash(
   }
 
   // Compile.
-  onProgress({ stage: "compile", message: `arduino-cli compile (${fqbn})` });
-  const compileSession = bmoc.registerSession({
-    type: "arduino-compile",
-    pid: undefined,
-    sketchPath,
-    fqbn,
-  });
+  // If the first compile fails with a "platform not found" style error
+  // (rare — usually means a partial install: `core list` saw it but the
+  // actual files are gone or corrupted), we run ensureCore() once more
+  // with forceReinstall, then retry the compile a single time. Anything
+  // beyond that is a real bug and we surface the error to the user.
   const compileArgs = [...cli.baseArgs, "compile", "--fqbn", fqbn];
   for (const prop of req.buildProperties ?? []) {
     compileArgs.push("--build-property", prop);
   }
   compileArgs.push(sketchDir);
-  const compile = await runCommandAsync(
-    cli.bin,
-    compileArgs,
-    {
-      env: cli.env,
-      timeoutMs: 600000,
-      onStdout: (c) => onProgress({ stage: "compile", message: "stdout", chunk: c }),
-      onStderr: (c) => onProgress({ stage: "compile", message: "stderr", chunk: c }),
-      onProcess: (child) => {
-        active = { kill: () => child.kill("SIGKILL") };
-      },
+
+  const runCompile = async (attempt: number) => {
+    onProgress({
+      stage: "compile",
+      message:
+        attempt === 1
+          ? `arduino-cli compile (${fqbn})`
+          : `arduino-cli compile retry after auto-heal (${fqbn})`,
+    });
+    const session = bmoc.registerSession({
+      type: "arduino-compile",
+      pid: undefined,
+      sketchPath,
+      fqbn,
+    });
+    const result = await runCommandAsync(
+      cli.bin,
+      compileArgs,
+      {
+        env: cli.env,
+        timeoutMs: 600000,
+        onStdout: (c) => onProgress({ stage: "compile", message: "stdout", chunk: c }),
+        onStderr: (c) => onProgress({ stage: "compile", message: "stderr", chunk: c }),
+        onProcess: (child) => {
+          active = { kill: () => child.kill("SIGKILL") };
+        },
+      }
+    );
+    active = null;
+    try {
+      await bmoc.closeSession(session);
+    } catch {
+      // session may already be torn down; that's fine
     }
-  );
-  active = null;
-  try {
-    await bmoc.closeSession(compileSession);
-  } catch {
-    // session may already be torn down; that's fine
+    return result;
+  };
+
+  let compile = await runCompile(1);
+  if (
+    !cancelled &&
+    (compile.error || compile.status !== 0) &&
+    looksLikeMissingPlatform(compile.stderr, tmpl.manifest.core)
+  ) {
+    onProgress({
+      stage: "core-install",
+      message: `[auto-heal] compile reported missing ${tmpl.manifest.core} — reinstalling and retrying`,
+    });
+    const heal = await ensureCore(
+      cli.bin,
+      cli.baseArgs,
+      cli.env,
+      tmpl.manifest.core,
+      onProgress,
+      true
+    );
+    if (heal.ok) {
+      compile = await runCompile(2);
+    } else {
+      onProgress({
+        stage: "compile",
+        message: `[auto-heal failed] ${heal.reason ?? "core reinstall failed"}`,
+      });
+    }
   }
   if (compile.error || compile.status !== 0) {
     const reason = cancelled

@@ -2,7 +2,6 @@
   import { onDestroy } from "svelte";
   import { fleet, vehicleState } from "../stores/vehicles";
   import { inputMode } from "../stores/inputMode";
-  import StopButton from "../components/StopButton.svelte";
   import Numpad from "../components/Numpad.svelte";
   import Gamepad from "../components/Gamepad.svelte";
   import SpeedSlider from "../components/SpeedSlider.svelte";
@@ -27,7 +26,6 @@
   <div class="stage">
     <div class="camera">
       <CameraFeed />
-      <StopButton />
     </div>
     <AudioFeed />
     <IntentBar />

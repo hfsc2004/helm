@@ -77,6 +77,23 @@ const int IR_PIN_FR = 33; // front-right (~45° E of center)
 const int IR_PIN_RR = 35; // rear        (0° S)
 const int IR_SAMPLES = 4; // tiny rolling average — the Sharps are jittery
 
+// ===== Collision guard =====
+// Refuses drive commands when an obstacle is too close to the direction
+// of travel. Only the dead-ahead and dead-behind sensors gate the guard
+// — the 45° sensors are "peripheral vision" and would over-trigger on
+// walls we're driving alongside (parking, doorframes, etc).
+//
+// Threshold defaults to ~2-3cm (Sharp GP2Y0A21 reads ~2800 counts at
+// that range, at 11dB attenuation). Editable at runtime via
+// /config/guard?threshold=N — in-RAM only (resets on boot); re-flash
+// to change the default. Hysteresis prevents block/unblock chatter
+// when the reading hovers right at the threshold.
+const int GUARD_DEFAULT_THRESHOLD = {{guard.defaultThreshold}};
+const int GUARD_HYSTERESIS = 200; // release when reading drops this far below threshold
+volatile int gGuardThreshold = GUARD_DEFAULT_THRESHOLD;
+volatile bool gGuardForwardBlocked = false;
+volatile bool gGuardReverseBlocked = false;
+
 WebServer server(HTTP_PORT);
 
 volatile int gLeftCmd = 0;   // -255..255
@@ -89,6 +106,24 @@ int readIrAveraged(int pin) {
     sum += analogRead(pin);
   }
   return (int)(sum / IR_SAMPLES);
+}
+
+// Re-evaluate the forward/reverse guards from the latest sensor readings.
+// Uses Schmitt-style hysteresis: trip when reading >= threshold, release
+// only after it drops to (threshold - HYSTERESIS). Without this, a value
+// that oscillates around the threshold causes block/unblock chatter.
+void updateGuards(int irFrontCenter, int irRear) {
+  const int releaseThreshold = gGuardThreshold - GUARD_HYSTERESIS;
+  if (gGuardForwardBlocked) {
+    if (irFrontCenter < releaseThreshold) gGuardForwardBlocked = false;
+  } else {
+    if (irFrontCenter >= gGuardThreshold) gGuardForwardBlocked = true;
+  }
+  if (gGuardReverseBlocked) {
+    if (irRear < releaseThreshold) gGuardReverseBlocked = false;
+  } else {
+    if (irRear >= gGuardThreshold) gGuardReverseBlocked = true;
+  }
 }
 
 IPAddress cidrToMask(int cidr) {
@@ -189,6 +224,7 @@ void handleTelemetry() {
   int irFC = readIrAveraged(IR_PIN_FC);
   int irFR = readIrAveraged(IR_PIN_FR);
   int irRR = readIrAveraged(IR_PIN_RR);
+  updateGuards(irFC, irRR);
   String json = "{";
   json += "\"left\":" + String(gLeftCmd) + ",";
   json += "\"right\":" + String(gRightCmd) + ",";
@@ -201,7 +237,10 @@ void handleTelemetry() {
   json += "\"irFrontLeft\":" + String(irFL) + ",";
   json += "\"irFrontCenter\":" + String(irFC) + ",";
   json += "\"irFrontRight\":" + String(irFR) + ",";
-  json += "\"irRear\":" + String(irRR);
+  json += "\"irRear\":" + String(irRR) + ",";
+  json += "\"guardThreshold\":" + String(gGuardThreshold) + ",";
+  json += "\"guardForwardBlocked\":" + String(gGuardForwardBlocked ? "true" : "false") + ",";
+  json += "\"guardReverseBlocked\":" + String(gGuardReverseBlocked ? "true" : "false");
   json += "}";
   server.send(200, "application/json", json);
 }
@@ -265,6 +304,26 @@ void handleCmd() {
   left = constrain(left, -MAX_SPEED, MAX_SPEED);
   right = constrain(right, -MAX_SPEED, MAX_SPEED);
 
+  // Collision guard: refresh from latest sensor reads, then refuse the
+  // command if it would drive us into a wall. Only blocks "both wheels
+  // same direction" — in-place turns and stops always pass so the
+  // operator can escape a pinned position. The deadman keeps the
+  // previous command alive when this returns ok:false, so the motors
+  // still time out and stop within DEADMAN_MS.
+  updateGuards(readIrAveraged(IR_PIN_FC), readIrAveraged(IR_PIN_RR));
+  const bool wantForward = (left > 0 && right > 0);
+  const bool wantReverse = (left < 0 && right < 0);
+  if (wantForward && gGuardForwardBlocked) {
+    server.send(409, "application/json",
+      "{\"ok\":false,\"blocked\":\"forward\",\"reason\":\"front IR over threshold\"}");
+    return;
+  }
+  if (wantReverse && gGuardReverseBlocked) {
+    server.send(409, "application/json",
+      "{\"ok\":false,\"blocked\":\"reverse\",\"reason\":\"rear IR over threshold\"}");
+    return;
+  }
+
   gLeftCmd = left;
   gRightCmd = right;
   gLastCmdMs = millis();
@@ -279,6 +338,29 @@ void handleCmd() {
   server.send(200, "application/json", json);
 }
 
+// Runtime tuning for the collision guard. In-RAM only; resets on boot.
+// Use this to walk the truck up to an obstacle, read irFrontCenter from
+// /telemetry, and set the threshold without re-flashing.
+//   GET /config/guard?threshold=2800
+void handleConfigGuard() {
+  if (!server.hasArg("threshold")) {
+    String json = "{";
+    json += "\"threshold\":" + String(gGuardThreshold) + ",";
+    json += "\"hysteresis\":" + String(GUARD_HYSTERESIS);
+    json += "}";
+    server.send(200, "application/json", json);
+    return;
+  }
+  int v = server.arg("threshold").toInt();
+  // ADC range is 0..4095. Clamp into something that can't disable the
+  // guard by accident (0) or set it above the max readable value.
+  if (v < 100) v = 100;
+  if (v > 4000) v = 4000;
+  gGuardThreshold = v;
+  String json = "{\"ok\":true,\"threshold\":" + String(gGuardThreshold) + "}";
+  server.send(200, "application/json", json);
+}
+
 void handleRoot() {
   String help;
   help += "ESP32 Remote Control online\\n";
@@ -290,6 +372,8 @@ void handleRoot() {
   help += "GET /cmd?turn=-120 (left)\\n";
   help += "GET /cmd?left=120&right=90\\n";
   help += "GET /cmd?stop=1\\n";
+  help += "GET /config/guard            (show current threshold)\\n";
+  help += "GET /config/guard?threshold=N (tune collision guard)\\n";
   server.send(200, "text/plain", help);
 }
 
@@ -298,7 +382,7 @@ void connectWifi() {
   if (USE_STATIC_IP) {
     IPAddress subnet = (STATIC_CIDR >= 0 && STATIC_CIDR <= 32) ? cidrToMask(STATIC_CIDR) : STATIC_SUBNET;
     IPAddress gateway = USE_STATIC_GATEWAY ? STATIC_GATEWAY : deriveGatewayFromIp(STATIC_IP);
-    const configured = WiFi.config(STATIC_IP, gateway, subnet, STATIC_DNS1, STATIC_DNS2);
+    const bool configured = WiFi.config(STATIC_IP, gateway, subnet, STATIC_DNS1, STATIC_DNS2);
     if (!configured) {
       Serial.println("Static IP config failed; falling back to DHCP.");
     } else {
@@ -379,6 +463,7 @@ void setup() {
   server.on("/health", HTTP_GET, handleHealth);
   server.on("/telemetry", HTTP_GET, handleTelemetry);
   server.on("/cmd", HTTP_GET, handleCmd);
+  server.on("/config/guard", HTTP_GET, handleConfigGuard);
   server.begin();
 
   gLeftCmd = 0;

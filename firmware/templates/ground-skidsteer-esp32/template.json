@@ -17,6 +17,7 @@
     { "key": "motor.leftTrim",     "type": "number",  "default": 0,      "label": "Left motor trim (-40..40)" },
     { "key": "motor.rightTrim",    "type": "number",  "default": 0,      "label": "Right motor trim (-40..40)" },
     { "key": "motor.invertLeft",   "type": "boolean", "default": false,  "label": "Invert left motor?" },
-    { "key": "motor.invertRight",  "type": "boolean", "default": false,  "label": "Invert right motor?" }
+    { "key": "motor.invertRight",  "type": "boolean", "default": false,  "label": "Invert right motor?" },
+    { "key": "guard.defaultThreshold", "type": "number", "default": 2800, "label": "Collision-guard IR threshold (counts; ~2800 ≈ 2-3cm)" }
   ]
 }

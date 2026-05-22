@@ -61,3 +61,7 @@ models/
 
 # Mockups (working drafts, not part of the product)
 docs/mockups/
+
+# Firmware dumps (local-only — large binaries; use Git LFS if we ever need to ship one)
+firmware/**/backup-*/
+*.bin

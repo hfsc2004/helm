@@ -190,18 +190,30 @@ async function httpGet(
     const body = await res.text();
     return { status: res.status, body };
   } catch (err) {
+    const host = (() => {
+      try {
+        const u = new URL(url);
+        return { name: u.hostname, port: u.port || "80" };
+      } catch {
+        return { name: url, port: "?" };
+      }
+    })();
     // Translate Node's raw "This operation was aborted" into something a
     // user can actually act on. Show host:port and the timeout.
     if (timedOut) {
-      const host = (() => {
-        try {
-          const u = new URL(url);
-          return `${u.hostname}:${u.port || "80"}`;
-        } catch {
-          return url;
-        }
-      })();
-      throw new Error(`drive board did not respond within ${timeoutMs}ms (${host})`);
+      throw new Error(
+        `drive board did not respond within ${timeoutMs}ms (${host.name}:${host.port})`
+      );
+    }
+    // ENOTFOUND on a .local hostname almost always means the host has no
+    // mDNS resolver running (no Avahi on Linux, no Bonjour on Windows).
+    // Surface a fix the user can apply instead of a raw DNS error.
+    const message = err instanceof Error ? err.message : String(err);
+    if (host.name.endsWith(".local") && /ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(message)) {
+      throw new Error(
+        `couldn't resolve ${host.name} — this host doesn't have an mDNS resolver. ` +
+        `Install Avahi (Linux) or Bonjour (Windows), or set a static IP for the vehicle.`
+      );
     }
     throw err;
   } finally {

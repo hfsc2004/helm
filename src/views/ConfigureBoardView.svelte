@@ -5,6 +5,8 @@
     FlashStreamEvent,
     FlashTemplateSummary,
     SerialPortInfo,
+    WifiNetworkInfo,
+    WifiScanResponse,
   } from "@shared/ipc-channels";
   import { backToList } from "../stores/devices-view";
   import { fleet } from "../stores/vehicles";
@@ -74,11 +76,84 @@
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
 
+  // The mDNS hostname the firmware will advertise. Defaults to the vehicle
+  // slug (already RFC-6763 safe — lowercase, alphanumerics, hyphens). Empty
+  // when the user hasn't typed a name yet; we fall back to "psf-robot" at
+  // flash time so the firmware always has something to advertise.
+  $: mdnsName = vehicleSlug || "psf-robot";
+  $: mdnsHost = `${mdnsName}.local`;
+
   let wifiSsid = "";
   let wifiPassword = "";
+
+  // Host-side Wi-Fi scan. When ok with results, we show a dropdown; when
+  // unsupported or empty we silently fall back to a plain text input so
+  // nothing about the existing flow gets worse on platforms we haven't
+  // wired (macOS, Windows). The user can always opt into manual entry.
+  let wifiScan: WifiScanResponse | null = null;
+  let wifiScanLoading = false;
+  let wifiManualEntry = false;
+
+  // The host's radio sees networks the target board can't reach — most ESP32
+  // chips are 2.4GHz-only. Derive which bands the selected template can
+  // actually join from its FQBN, then filter the scan results so the user
+  // doesn't pick an SSID that would silently fail to associate.
+  $: supportedBands = boardBandsFromFqbn(selectedTemplate?.fqbn ?? "");
+  $: filteredWifiNetworks = (wifiScan?.networks ?? []).filter(
+    (n) => n.band === null || supportedBands.includes(n.band)
+  );
+  $: hiddenByBandCount =
+    (wifiScan?.networks.length ?? 0) - filteredWifiNetworks.length;
+  $: wifiHasResults = !!wifiScan && wifiScan.ok && filteredWifiNetworks.length > 0;
+  $: showWifiDropdown = wifiHasResults && !wifiManualEntry;
+
+  function boardBandsFromFqbn(fqbn: string): Array<"2.4GHz" | "5GHz" | "6GHz"> {
+    // Source of truth is the silicon, not the sketch. Update this map when
+    // adding a template that targets a new chip family.
+    const f = fqbn.toLowerCase();
+    // Wi-Fi 6 / 6E parts: ESP32-C5, ESP32-C6 (2.4 + 5GHz on C5; 2.4 only on C6
+    // but with 802.11ax). Most ESP32 family chips remain 2.4-only.
+    if (f.includes("esp32c5")) return ["2.4GHz", "5GHz"];
+    // Boards Helm doesn't ship templates for today but planning for: pico 2w
+    // dual-band. Safe default for any other chip is 2.4GHz-only.
+    if (f.includes("pico_2w") || f.includes("pico-2w")) return ["2.4GHz", "5GHz"];
+    return ["2.4GHz"];
+  }
+
+  async function refreshWifiScan(): Promise<void> {
+    wifiScanLoading = true;
+    try {
+      wifiScan = await window.helm.wifi.scan();
+    } catch (err) {
+      wifiScan = {
+        ok: false,
+        networks: [],
+        reason: err instanceof Error ? err.message : String(err),
+      };
+    } finally {
+      wifiScanLoading = false;
+    }
+  }
+
+  function wifiBandLabel(band: WifiNetworkInfo["band"]): string {
+    return band ?? "?";
+  }
+
+  function wifiSignalBars(signal: number | null): string {
+    if (signal === null) return "····";
+    if (signal >= 75) return "▮▮▮▮";
+    if (signal >= 50) return "▮▮▮·";
+    if (signal >= 25) return "▮▮··";
+    return "▮···";
+  }
   let ipMode: "static" | "dhcp" = "static";
   let staticIp = "192.168.1.50";
   let staticCidr = 24;
+
+  // What to write into Vehicle.transport.host. With DHCP we use mDNS; with
+  // a static IP, the IP itself is the most direct route. The user can edit
+  // this later from the Vehicles tab if their network blocks mDNS.
+  $: resolvedHost = ipMode === "static" ? staticIp.trim() : mdnsHost;
 
   // Drive-board advanced (motor trims & invert flags).
   let advancedOpen = false;
@@ -167,8 +242,7 @@
   }
 
   onMount(async () => {
-    await refreshTemplates();
-    await fleet.refresh();
+    await Promise.all([refreshTemplates(), fleet.refresh(), refreshWifiScan()]);
   });
 
   function appendLog(stage: string, text: string): void {
@@ -188,6 +262,7 @@
         "wifi.useStatic": ipMode === "static",
         "wifi.staticIp": staticIp,
         "wifi.staticCidr": staticCidr,
+        "mdns.name": mdnsName,
         "http.port": videoHttpPort,
         "camera.pinProfile": videoPinProfile,
         "camera.frameSize": videoFrameSize,
@@ -200,6 +275,7 @@
       "wifi.useStatic": ipMode === "static",
       "wifi.staticIp": staticIp,
       "wifi.staticCidr": staticCidr,
+      "mdns.name": mdnsName,
       "motor.leftTrim": motorLeftTrim,
       "motor.rightTrim": motorRightTrim,
       "motor.invertLeft": motorInvertLeft,
@@ -308,7 +384,7 @@
         if (!targetId && vehicleName.trim()) {
           const addRes = await fleet.add({
             name: vehicleName.trim(),
-            host: ipMode === "static" ? staticIp.trim() : staticIp.trim(),
+            host: resolvedHost,
           });
           if (!addRes.ok || !addRes.vehicle) {
             registryAddError = addRes.error ?? "vehicle create failed";
@@ -321,7 +397,7 @@
           return;
         }
         const camRes = await fleet.setCamera(targetId, {
-          baseUrl: `http://${staticIp.trim()}:${videoHttpPort}`,
+          baseUrl: `http://${resolvedHost}:${videoHttpPort}`,
           streamPath: videoStreamPath,
           snapshotPath: videoSnapshotPath,
           flashStatusPath: videoFlashStatusPath,
@@ -343,7 +419,7 @@
     try {
       const res = await fleet.add({
         name: vehicleName.trim(),
-        host: ipMode === "static" ? staticIp.trim() : staticIp.trim(),
+        host: resolvedHost,
       });
       if (!res.ok || !res.vehicle) {
         registryAddError = res.error ?? "add failed";
@@ -472,16 +548,72 @@
 
     <section>
       <h3>WiFi</h3>
-      <label>
-        <span class="lbl">SSID</span>
-        <input
-          type="text"
-          bind:value={wifiSsid}
-          on:input={() => markTouched("wifiSsid")}
-          placeholder="MyNetwork"
-          disabled={flashing}
-        />
-      </label>
+      {#if showWifiDropdown}
+        <label>
+          <span class="lbl">SSID
+            <button
+              type="button"
+              class="link"
+              on:click={() => void refreshWifiScan()}
+              disabled={flashing || wifiScanLoading}
+            >{wifiScanLoading ? "scanning…" : "rescan"}</button>
+            <button
+              type="button"
+              class="link"
+              on:click={() => { wifiManualEntry = true; }}
+              disabled={flashing}
+            >type manually</button>
+          </span>
+          <select
+            bind:value={wifiSsid}
+            on:change={() => markTouched("wifiSsid")}
+            disabled={flashing}
+          >
+            <option value="" disabled selected={!wifiSsid}>— pick a network —</option>
+            {#each filteredWifiNetworks as n (n.ssid)}
+              <option value={n.ssid}>
+                {wifiSignalBars(n.signal)} {n.ssid} · {wifiBandLabel(n.band)} · {n.security}
+              </option>
+            {/each}
+          </select>
+        </label>
+        {#if hiddenByBandCount > 0}
+          <p class="muted small">
+            {hiddenByBandCount} network{hiddenByBandCount === 1 ? "" : "s"} hidden
+            (this board is {supportedBands.join(" / ")} only).
+          </p>
+        {/if}
+      {:else}
+        <label>
+          <span class="lbl">SSID
+            {#if wifiHasResults}
+              <button
+                type="button"
+                class="link"
+                on:click={() => { wifiManualEntry = false; }}
+                disabled={flashing}
+              >pick from scan</button>
+            {:else if !wifiScanLoading}
+              <button
+                type="button"
+                class="link"
+                on:click={() => void refreshWifiScan()}
+                disabled={flashing}
+              >scan</button>
+            {/if}
+          </span>
+          <input
+            type="text"
+            bind:value={wifiSsid}
+            on:input={() => markTouched("wifiSsid")}
+            placeholder="MyNetwork"
+            disabled={flashing}
+          />
+        </label>
+        {#if wifiScan && !wifiScan.ok && !wifiHasResults}
+          <p class="muted small">{wifiScan.reason ?? "scan unavailable on this host"}</p>
+        {/if}
+      {/if}
       <label>
         <span class="lbl">Password</span>
         <input
@@ -541,11 +673,18 @@
           />
         </label>
         <p class="muted small">
-          The board will be reached at this IP after flash.
+          The board will be reached at <code>{staticIp.trim()}</code>.
+          It will also advertise itself as
+          <code>{mdnsHost}</code> via mDNS as a backup.
         </p>
       {:else}
         <p class="muted small">
-          DHCP: the board prints its assigned IP to serial on boot.
+          DHCP: the router assigns the IP. Helm will reach the board by its mDNS name
+          <code>{mdnsHost}</code> instead, so a new lease won't break the connection.
+        </p>
+        <p class="muted small">
+          Heads-up: mDNS needs Avahi (Linux) or Bonjour (Windows). Most desktops already have one;
+          on networks that block multicast (some guest WiFi), switch to Static IP instead.
         </p>
       {/if}
     </section>

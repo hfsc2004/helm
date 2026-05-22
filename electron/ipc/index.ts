@@ -33,6 +33,7 @@ import * as cameraStream from "../../core/vehicles/camera-stream.js";
 import * as ollamaManager from "../../core/llm/ollama/manager.js";
 import { plan, DEFAULT_PLANNER_MODEL } from "../../core/llm/planner.js";
 import { listSerialPorts } from "../../core/serial/index.js";
+import { scan as scanWifi } from "../../core/wifi/scan.js";
 import {
   detectHardware,
   classifyForInference,
@@ -458,6 +459,11 @@ export function registerIpcHandlers(opts: { version: string }): void {
   // ---------- serial (one-shot) ----------
   ipcMain.handle(IPC.serial.list, async () => {
     return { ports: listSerialPorts() };
+  });
+
+  // ---------- wifi (one-shot scan) ----------
+  ipcMain.handle(IPC.wifi.scan, async () => {
+    return scanWifi();
   });
 
   // ---------- hardware (one-shot) ----------

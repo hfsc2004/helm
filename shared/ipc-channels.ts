@@ -201,6 +201,24 @@ export interface SerialPortInfo {
   boardHint: "raspberry-pi-pico" | "esp32" | "";
 }
 
+export interface WifiNetworkInfo {
+  ssid: string;
+  /** 0..100 signal strength, or null if unknown. */
+  signal: number | null;
+  /** Free-form per-OS string ("WPA2", "OPEN", "WPA1 WPA2", ...). */
+  security: string;
+  /** Useful for filtering bands the target board can't reach. */
+  band: "2.4GHz" | "5GHz" | "6GHz" | null;
+}
+
+export interface WifiScanResponse {
+  ok: boolean;
+  networks: WifiNetworkInfo[];
+  /** True on platforms not yet wired — caller should fall back to text input. */
+  unsupported?: boolean;
+  reason?: string;
+}
+
 export interface HardwareInfo {
   hardware: {
     ram_gb?: number;
@@ -302,6 +320,9 @@ export interface HelmAPI {
   serial: {
     list(): Promise<{ ports: SerialPortInfo[] }>;
   };
+  wifi: {
+    scan(): Promise<WifiScanResponse>;
+  };
   hardware: {
     detect(): Promise<HardwareInfo>;
   };
@@ -355,6 +376,9 @@ export const IPC = {
   },
   serial: {
     list: "serial:list",
+  },
+  wifi: {
+    scan: "wifi:scan",
   },
   hardware: {
     detect: "hardware:detect",

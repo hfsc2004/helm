@@ -135,11 +135,11 @@
           <h3>Drive board (ESP32)</h3>
           <p class="muted small">Where the motor-control firmware lives.</p>
           <label>
-            <span>Host (IP or hostname on your LAN)</span>
+            <span>Host (IP or <code>name.local</code> on your LAN)</span>
             <input
               type="text"
               bind:value={host}
-              placeholder="172.20.0.15"
+              placeholder="psf-robot.local"
               disabled={busy}
             />
           </label>
@@ -170,11 +170,11 @@
               Runs on its own IP — does not need to match the drive board.
             </p>
             <label>
-              <span>Video host</span>
+              <span>Video host (IP or <code>name.local</code>)</span>
               <input
                 type="text"
                 bind:value={videoHost}
-                placeholder="172.20.0.16"
+                placeholder="psf-robot-cam.local"
                 disabled={busy}
               />
             </label>

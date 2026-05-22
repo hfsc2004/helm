@@ -29,6 +29,7 @@ const CH = {
   vehicleDriveClose: "vehicle:drive-close",
   vehicleDriveEventPrefix: "vehicle:drive-event:",
   serialList: "serial:list",
+  wifiScan: "wifi:scan",
   hardwareDetect: "hardware:detect",
   ollamaStatus: "ollama:status",
   flashListTemplates: "flash:list-templates",
@@ -93,6 +94,9 @@ const api = {
   },
   serial: {
     list: () => ipcRenderer.invoke(CH.serialList),
+  },
+  wifi: {
+    scan: () => ipcRenderer.invoke(CH.wifiScan),
   },
   hardware: {
     detect: () => ipcRenderer.invoke(CH.hardwareDetect),

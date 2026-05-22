@@ -28,6 +28,7 @@ import "./commands/hf-token.js";
 import "./commands/model.js";
 import "./commands/drive.js";
 import "./commands/serial.js";
+import "./commands/wifi.js";
 import "./commands/toolchain.js";
 import "./commands/flash.js";
 

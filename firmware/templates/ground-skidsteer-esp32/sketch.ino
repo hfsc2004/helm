@@ -6,10 +6,15 @@
 
 #include <WiFi.h>
 #include <WebServer.h>
+#include <ESPmDNS.h>
 
 // ===== Wi-Fi =====
 const char* WIFI_SSID = "{{wifi.ssid}}";
 const char* WIFI_PASS = "{{wifi.password}}";
+
+// mDNS hostname — the robot will be reachable as "<MDNS_NAME>.local"
+// from any host on the same LAN, even if DHCP hands it a new IP.
+const char* MDNS_NAME = "{{mdns.name}}";
 
 // Network mode:
 // - false: DHCP (router assigns IP/subnet/gateway/DNS)
@@ -172,7 +177,8 @@ void handleHealth() {
   json += "\"subnet\":\"" + WiFi.subnetMask().toString() + "\",";
   json += "\"dns1\":\"" + WiFi.dnsIP(0).toString() + "\",";
   json += "\"dns2\":\"" + WiFi.dnsIP(1).toString() + "\",";
-  json += "\"port\":" + String(HTTP_PORT);
+  json += "\"port\":" + String(HTTP_PORT) + ",";
+  json += "\"mdns\":\"" + String(MDNS_NAME) + ".local\"";
   json += "}";
   server.send(200, "application/json", json);
 }
@@ -333,6 +339,16 @@ void connectWifi() {
   Serial.print("  Subnet: "); Serial.println(WiFi.subnetMask());
   Serial.print("  DNS1: "); Serial.println(WiFi.dnsIP(0));
   Serial.print("  DNS2: "); Serial.println(WiFi.dnsIP(1));
+
+  // Start the mDNS responder so the robot is reachable by hostname.
+  // We advertise the HTTP control port as well so service browsers
+  // (and our own helm discovery) can find the device by service type.
+  if (MDNS.begin(MDNS_NAME)) {
+    MDNS.addService("http", "tcp", HTTP_PORT);
+    Serial.print("  mDNS: http://"); Serial.print(MDNS_NAME); Serial.println(".local");
+  } else {
+    Serial.println("  mDNS: failed to start (continuing without it)");
+  }
 }
 
 void setup() {

@@ -5,6 +5,7 @@ import { emit, log } from "../output.js";
 import { register, type RuntimeCommand } from "../registry.js";
 import { COMMON_EXIT_CODES } from "../../core/schema.js";
 import * as registry from "../../core/vehicles/registry.js";
+import * as adapter from "../../core/vehicles/ground-skidsteer.js";
 import * as cp from "../../core/control-plane/client.js";
 
 /**
@@ -35,10 +36,19 @@ import * as cp from "../../core/control-plane/client.js";
  * without scraping stderr.
  *
  * Flags:
- *   --out <path>   write the JPEG to a specific path
- *   --base64       emit { base64, bytes, contentType } instead of writing
- *   --stdout       pipe the raw JPEG bytes to stdout, no JSON wrapping
- *   --no-bridge    skip the control plane; always hit /capture directly
+ *   --out <path>        write the JPEG to a specific path
+ *   --base64            emit { base64, bytes, contentType } instead of writing
+ *   --stdout            pipe the raw JPEG bytes to stdout, no JSON wrapping
+ *   --no-bridge         skip the control plane; always hit /capture directly
+ *   --no-telemetry      skip the paired /telemetry fetch (default: included)
+ *
+ * Why telemetry is on by default:
+ *   An LLM driver looking at a frame almost always wants to know whether
+ *   the collision guard would block a forward command, what the IR
+ *   distances say about peripheral obstacles, etc. Pairing both in one
+ *   call means the agent doesn't have to issue a separate request and
+ *   reason about whether the two were taken at the same moment. Humans
+ *   reading the JPEG directly can pass --no-telemetry to skip the cost.
  */
 
 function slugify(name: string): string {
@@ -107,6 +117,13 @@ const vehicleSnapshot: RuntimeCommand = {
         description:
           "Skip the running Helm-UI's loopback control plane; always hit /capture directly.",
       },
+      {
+        name: "no-telemetry",
+        kind: "boolean",
+        default: false,
+        description:
+          "Skip the paired /telemetry fetch. Telemetry is included by default so an LLM driver gets IR distances + guard state alongside the frame.",
+      },
     ],
     streams: false,
     events: [],
@@ -144,6 +161,30 @@ const vehicleSnapshot: RuntimeCommand = {
     const wantStdout = flags["stdout"] === true || flags["stdout"] === "true";
     const wantBase64 = flags["base64"] === true || flags["base64"] === "true";
     const skipBridge = flags["no-bridge"] === true || flags["no-bridge"] === "true";
+    const skipTelemetry =
+      flags["no-telemetry"] === true || flags["no-telemetry"] === "true";
+
+    // Kick off the telemetry fetch in parallel with the snapshot so the
+    // paired data costs us a single round-trip's worth of latency, not two.
+    // Best-effort: if the drive board is slow or unreachable, we surface
+    // the failure inline but never block the camera grab.
+    const telemetryPromise: Promise<{
+      ok: boolean;
+      data?: Record<string, unknown>;
+      error?: string;
+    }> | null = skipTelemetry
+      ? null
+      : adapter
+          .getState(vehicle, { timeoutMs })
+          .then((data) =>
+            data
+              ? { ok: true, data: data as Record<string, unknown> }
+              : { ok: false, error: "drive board returned no telemetry body" }
+          )
+          .catch((err: unknown) => ({
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          }));
 
     let bytes: Buffer;
     let contentType: string;
@@ -194,13 +235,24 @@ const vehicleSnapshot: RuntimeCommand = {
       }
     }
 
+    // Resolve telemetry now (it was kicked off in parallel with the snapshot
+    // so the wait is usually instant). Always returns an object; the agent
+    // can branch on telemetry.ok to know whether to trust the values.
+    const telemetry = telemetryPromise ? await telemetryPromise : null;
+
     if (wantStdout) {
-      // Pipe raw bytes — no JSON wrapping. Status to stderr so an agent
-      // redirecting stdout still sees what happened.
+      // Pipe raw bytes — no JSON wrapping. Status (and telemetry, if any)
+      // goes to stderr so an agent redirecting stdout still sees what
+      // happened and gets the proximity data.
       process.stdout.write(bytes);
       log(
         `vehicle-snapshot: ${bytes.length} bytes (${contentType}, source=${source})`
       );
+      if (telemetry?.ok && telemetry.data) {
+        log(`telemetry: ${JSON.stringify(telemetry.data)}`);
+      } else if (telemetry && !telemetry.ok) {
+        log(`telemetry-failed: ${telemetry.error ?? "unknown"}`);
+      }
       return 0;
     }
 
@@ -215,6 +267,7 @@ const vehicleSnapshot: RuntimeCommand = {
         capturedAt: isoNow(),
         source,
         base64: bytes.toString("base64"),
+        telemetry,
       });
       return 0;
     }
@@ -249,6 +302,7 @@ const vehicleSnapshot: RuntimeCommand = {
       contentType,
       capturedAt: isoNow(),
       source,
+      telemetry,
     });
     return 0;
   },

@@ -14,9 +14,15 @@ Working end-to-end on Linux x64:
 - ✅ Drive an ESP32 skid-steer truck over WiFi (CLI and UI)
 - ✅ **Dual-board vehicles**: separate drive ESP32 + ESP32-S3 camera-and-video board, each with its own IP, Wi-Fi credentials, static-IP block, and flash params — mirrors the PSF Core Relay "Gateway Card" shape
 - ✅ **Configure-and-flash from the UI**: click a detected board → pick a template → fill in Wi-Fi / camera params → flash with live arduino-cli output
+- ✅ **mDNS discovery** — drive boards advertise as `<name>.local` so DHCP IP changes don't break the connection; the host-side HTTP layer translates `ENOTFOUND` on `.local` names into "install Avahi (Linux) or Bonjour (Windows)" instead of a raw DNS error
+- ✅ **Host-side Wi-Fi scan** in the flash wizard — SSID dropdown lists networks the host sees (Linux/`nmcli` today, macOS/Windows fall back to text input), filtered to the bands the target board's radio can actually join (no 5GHz networks offered for an ESP32)
+- ✅ **Flash wizard polish** — yellow `!` chip names the missing field instead of silently disabling the Flash button; password reveal eye-icon so the user can verify a Wi-Fi typo *before* it gets baked into firmware; re-flashing the same robot updates the existing registry entry instead of erroring with "vehicle already exists"
+- ✅ **Auto-heal partial ESP32 core installs** — when arduino-cli's compile errors look like a corrupted platform install, Helm reinstalls the core and retries automatically; first-run failures get a one-line user-actionable cause (network / disk / permissions) instead of raw `ECONNREFUSED`
 - ✅ **Drive-tuning panel** per vehicle: action map (rotate intents 90/180° without re-flashing), swap-sides, invert-left/right
 - ✅ **Three input devices** for driving: Keyboard WASD (with QEZC diagonals), Keyboard NumPad (8/4/2/6 + 7/9/1/3), or Game Controller (left-stick tank mix); pick from the Devices tab
 - ✅ **Drive-speed slider** on the Drive view with +/- step buttons and keyboard shortcuts; live during a held drive
+- ✅ **Four IR distance sensors on the drive board** — Sharp GP2Y0A21s buffered through per-channel LM358s onto ADC1 GPIOs 34/32/33/35 (front-left at 45°W, front-center, front-right at 45°E, rear). Published as raw ADC counts on `/telemetry`; voltage→distance conversion stays host-side so the curve is hot-reloadable
+- ✅ **Collision guard** — firmware refuses `fwd` when the front-center IR exceeds the threshold and refuses `rev` when the rear IR does. Turns and stops always pass (escape hatch from a pinned position). Default ~2-3cm trigger; tunable at runtime via `GET /config/guard?threshold=N` — no re-flash needed
 - ✅ Plan commands from natural language via a local LLM (Ollama, isolated)
 - ✅ Download HF models with HF-token support, register them with Ollama
 - ✅ Detect USB/serial devices (Pi Pico, Pico 2, ESP32, ESP32-S3) and host GPUs
@@ -54,8 +60,10 @@ Both surfaces consume `core/` — neither owns business logic.
 ## End-to-end: drive a truck by talking to it
 
 ```bash
-# 1. Register the truck — drive ESP32 at .15, ESP32-S3 camera board at .16
-npm run helm -- vehicle-add 172.20.0.15 --name truck-01
+# 1. Register the truck — drive board by mDNS name (works with DHCP),
+#    camera board by IP for now. If you flashed via the Devices wizard,
+#    this is already done — skip to step 2.
+npm run helm -- vehicle-add truck.local --name truck-01
 ID=$(npm run helm -- vehicle-list | jq -r '.vehicles[0].id')
 npm run helm -- vehicle-camera-set $ID http://172.20.0.16:81
 
@@ -179,22 +187,70 @@ Per-vehicle cards. Each one shows endpoint, capabilities, and sidecars (camera /
 Bench surface for inspecting and configuring hardware:
 
 - **Driver input** — pick Keyboard WASD / Keyboard NumPad / Game Controller. Saved across restarts via localStorage. Gamepad detection is live while the tab is open.
-- **USB / Serial** — live list of attached microcontrollers with friendly board hints (Raspberry Pi Pico, ESP32, etc.). Click a detected board to open the **Configure Board** screen: template picker → board-type override (ESP32 drive / ESP32-S3 video / Pi Pico) → Wi-Fi + camera params → live flash output. Per-board flash params (FQBN override, `--build-property` for USB-CDC and pin profile, erase-before-upload, post-upload serial capture) are all exposed; the ESP32-S3 video template offers three pin profiles out of the box (`esp32s3_eye` / `ai_thinker_s3` / `elegoo_s3`).
+- **USB / Serial** — live list of attached microcontrollers with friendly board hints (Raspberry Pi Pico, ESP32, etc.). Click a detected board to open the **Configure Board** wizard (see [Flashing firmware](#flashing-firmware) below).
 - **Inference hardware** — detected GPUs with the headless-first NVIDIA selection (a P4 dedicated to inference wins over an M5000 driving the desktop, automatically).
 - **LLM backend** — private Ollama install state, port, models dir, disk used.
 
-The flash flow is also driveable from the CLI:
+## Flashing firmware
+
+Helm flashes microcontrollers from the same Devices tab you use to inspect them. Plug a board in over USB, the **USB / Serial** section detects it, click **Configure →**, and the wizard walks you through it.
+
+### From the UI
+
+1. **Plug the board in.** Linux usually exposes it as `/dev/ttyUSB0` (CP210x / CH340 bridges) or `/dev/ttyACM0` (native USB-CDC, including ESP32-S3 and Pico 2). Helm tags it with a board hint chip (green = ESP32, purple = Pi Pico).
+2. **Click Configure →.** Pick the template (auto-selected when only one matches the board kind).
+3. **Vehicle name.** Becomes the mDNS hostname automatically — naming the truck `Truck` makes it reachable as `truck.local` after flash.
+4. **Wi-Fi.** SSID dropdown shows what the host's radio can see, filtered to the bands the board can actually join. Eye-icon toggle on the password field so you can verify it before flashing it in. Networks on bands the target can't reach (e.g. 5GHz for a classic ESP32) are hidden with a "N networks hidden" note.
+5. **Networking.** Static IP (default) or DHCP. With DHCP, Helm stores the vehicle's `transport.host` as `<name>.local` instead of an IP, so a new DHCP lease doesn't break the connection. Heads-up: mDNS needs Avahi (Linux) or Bonjour (Windows); on a guest Wi-Fi that blocks multicast, switch to Static IP.
+6. **(Optional) Advanced.** Motor invert / trim. Per-board flash params (FQBN override, `--build-property` for USB-CDC and pin profile, erase-before-upload, post-upload serial capture) are exposed here too; the ESP32-S3 video template offers three pin profiles out of the box (`esp32s3_eye` / `ai_thinker_s3` / `elegoo_s3`).
+7. **Click Flash.** First time on a host, arduino-cli auto-installs the ESP32 core (~5–10 min, one time). Compile + upload streams live below. On success, Helm updates the registry — re-flashing the same robot updates the existing record instead of erroring "vehicle already exists".
+
+If the button is greyed out, a yellow `!` chip next to it names the missing field — no guessing which gate is closed.
+
+### From the CLI
+
+The same flow is driveable headless — useful for scripting and for the CI/agent path:
 
 ```bash
 npm run helm -- toolchain-status              # what's available (arduino-cli, mpremote)
 npm run helm -- flash-templates               # what we can program
-npm run helm -- flash-render --template video-esp32-s3 \
-  --var "wifi.ssid=MyNet,wifi.password=secret,camera.pinProfile=elegoo_s3"
+npm run helm -- wifi-scan                     # what SSIDs the host's radio sees (Linux today)
+
+# Render a template without flashing — sanity-check the variables
+npm run helm -- flash-render --template ground-skidsteer-esp32 \
+  --var "wifi.ssid=MyNet,wifi.password=secret,mdns.name=truck"
+
+# Flash the drive board
+npm run helm -- flash /dev/ttyUSB0 \
+  --template ground-skidsteer-esp32 \
+  --var "wifi.ssid=MyNet,wifi.password=secret,mdns.name=truck,wifi.useStatic=true,wifi.staticIp=172.20.0.15"
+
+# Flash the camera board with the recommended Elegoo S3 profile
 npm run helm -- flash /dev/ttyACM0 \
   --template video-esp32-s3 \
-  --var "wifi.ssid=MyNet,wifi.password=secret,wifi.staticIp=172.20.0.16" \
+  --var "wifi.ssid=MyNet,wifi.password=secret,wifi.staticIp=172.20.0.16,camera.pinProfile=elegoo_s3" \
   --board video --erase --capture-runtime-serial-ms 20000
 ```
+
+### After flash
+
+Once the board reboots and joins Wi-Fi, the firmware exposes:
+
+| Endpoint | What it does |
+|---|---|
+| `GET /health` | `{ok, mode, ip, gateway, subnet, port, mdns}` — confirm the board joined and learn its mDNS name |
+| `GET /telemetry` | Motor state, deadman age, RSSI, IP, **four IR readings (`irFrontLeft` / `irFrontCenter` / `irFrontRight` / `irRear`)**, **guard state (`guardThreshold` / `guardForwardBlocked` / `guardReverseBlocked`)** |
+| `GET /cmd?fwd=N` `&rev=N` `&turn=±N` `&left=N&right=N` `&stop=1` | Drive commands (the collision guard refuses `fwd` when the front-center IR is over threshold, and `rev` when the rear is; returns `409 {ok:false, blocked:"forward"\|"reverse"}`) |
+| `GET /config/guard` | `{threshold, hysteresis}` — read current settings |
+| `GET /config/guard?threshold=N` | Tune the collision-guard threshold at runtime; in-RAM only, resets on boot (re-flash to change the default) |
+
+### Troubleshooting
+
+- **"vehicle already exists"** — fixed; re-flashing the same name now reuses the existing registry record. If you see this on an older build, delete the record from the Vehicles tab and re-flash.
+- **mDNS works once then times out** — known; the responder isn't re-announcing periodically yet. Fall back to the board's IP (from `/health`) until that's fixed.
+- **Read from `/dev/ttyUSB0` stalls** — close Helm-UI (it competes with the bootloader for the serial port via background telemetry polls) and retry.
+- **First flash takes 10+ minutes** — that's the one-time ESP32 core install. Subsequent flashes are ~30s.
+- **Compile error: `'configured' does not name a type`** — fixed in the current template; was a dormant typo that only surfaced on the static-IP fallback path.
 
 ## Bring your own model
 
@@ -212,10 +268,10 @@ Both are vision-capable (the agent will eventually be able to see the camera fee
 | Vehicle | Status |
 |---|---|
 | ESP32 skid-steer ground robot (HTTP/WiFi) | Driving end-to-end |
+| Drive board with **4× Sharp IR distance sensors + collision guard** (front L/C/R + rear) | In production firmware |
 | ESP32-S3 camera sidecar (PSF-original streamer; 3 pin profiles) | Flash-ready, live MJPEG into Drive view |
-| Dual-board truck (drive ESP32 + ESP32-S3 video, separate IPs) | Driving end-to-end |
+| Dual-board truck (drive ESP32 + ESP32-S3 video, separate IPs, mDNS) | Driving end-to-end |
 | Roving microphone sidecar | Vehicle streams I2S mic to host, host-side playback |
-| ESP32 obstacle-avoidance autonomous variants | Sketches imported, not yet templated |
 | ESP32-S3 + Pico 2 quadcopter (with SNN/STDP flight control) | Planned |
 
 ## Design principles

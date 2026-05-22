@@ -43,7 +43,11 @@
   let selectedTemplateId = "";
 
   $: filteredTemplates = allTemplates.filter((t) => templateMatchesBoard(t, board));
-  $: selectedTemplate = filteredTemplates.find((t) => t.id === selectedTemplateId) ?? null;
+  // Derive from allTemplates (not filteredTemplates) so this can never be
+  // stale relative to the dropdown's bound value during reactive batching.
+  // If selectedTemplateId points at a template that exists at all, we want
+  // to find it.
+  $: selectedTemplate = allTemplates.find((t) => t.id === selectedTemplateId) ?? null;
 
   function templateMatchesBoard(t: FlashTemplateSummary, b: BoardKind): boolean {
     if (b === "esp32") {
@@ -62,10 +66,23 @@
   $: isVideoTemplate = selectedTemplate?.id === "video-esp32-s3";
   $: boardRole = isVideoTemplate ? ("video" as const) : ("drive" as const);
 
-  $: if (filteredTemplates.length === 1) {
-    selectedTemplateId = filteredTemplates[0]!.id;
-  } else if (!filteredTemplates.some((t) => t.id === selectedTemplateId)) {
-    selectedTemplateId = "";
+  // Keep selectedTemplateId in sync with whatever filteredTemplates currently
+  // contains. Three cases worth handling explicitly because the previous
+  // `length === 1 || stale` short-circuit was missing the "multiple available
+  // but selection is stale" case and could leave selectedTemplateId pointing
+  // at an id that no longer exists in the dropdown (so `selectedTemplate`
+  // resolves to null and canFlash() refuses with "pick a template" even
+  // though the dropdown visually shows a row).
+  $: {
+    const stillValid = filteredTemplates.some((t) => t.id === selectedTemplateId);
+    if (filteredTemplates.length === 0) {
+      selectedTemplateId = "";
+    } else if (!stillValid) {
+      // Either nothing was selected yet, or the previous selection got
+      // filtered out. Pick the first available so the user starts on a
+      // valid option without needing to re-click the dropdown.
+      selectedTemplateId = filteredTemplates[0]!.id;
+    }
   }
 
   // ---------- common form state ----------
@@ -85,6 +102,10 @@
 
   let wifiSsid = "";
   let wifiPassword = "";
+  // Show/mask the WiFi password while typing — lets the user verify they
+  // got it right before the firmware bakes it in (a typo here means
+  // re-flashing, which is slow and annoying).
+  let wifiPasswordVisible = false;
 
   // Host-side Wi-Fi scan. When ok with results, we show a dropdown; when
   // unsupported or empty we silently fall back to a plain text input so
@@ -295,22 +316,63 @@
     return flag ? [flag] : [];
   }
 
-  function canFlash(): boolean {
-    if (flashing) return false;
-    if (!selectedTemplate) return false;
-    if (!vehicleName.trim() || !vehicleSlug) {
-      if (!isVideoTemplate) return false;
-      // For video, name is optional — we can attach to an existing vehicle.
-      if (!attachToVehicleId) return false;
+  // Returns a human-readable reason the flash can't start, or "" when it's
+  // ready. Drives both the Flash button's disabled state and the visible
+  // checklist underneath it, so the user never has to guess what's missing.
+  // Resolves the selected template inline (rather than relying on the $:
+  // derived `selectedTemplate`) so the gate is consistent with what the
+  // dropdown is currently bound to, regardless of Svelte reactive ordering.
+  function flashBlockReason(): string {
+    if (flashing) return "flash in progress";
+    if (!selectedTemplateId) return "pick a template";
+    const tpl = allTemplates.find((t) => t.id === selectedTemplateId);
+    if (!tpl) {
+      return allTemplates.length === 0
+        ? "loading templates…"
+        : "pick a template";
     }
-    if (!wifiSsid.trim() || !wifiPassword) return false;
+    const tplIsVideo = tpl.id === "video-esp32-s3";
+    if (!vehicleName.trim()) {
+      if (!tplIsVideo) return "enter a vehicle name";
+      if (!attachToVehicleId) return "enter a vehicle name (or attach to an existing one)";
+    }
+    if (vehicleName.trim() && !vehicleSlug && !tplIsVideo) {
+      return "vehicle name needs at least one letter or number";
+    }
+    if (!wifiSsid.trim()) return "pick or type a WiFi SSID";
+    if (!wifiPassword) return "enter the WiFi password";
     if (ipMode === "static") {
       const m = staticIp.trim().match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-      if (!m) return false;
-      if (m.slice(1).some((s) => Number(s) > 255)) return false;
-      if (!Number.isInteger(staticCidr) || staticCidr < 0 || staticCidr > 32) return false;
+      if (!m) return "static IP must be in N.N.N.N form";
+      if (m.slice(1).some((s) => Number(s) > 255)) return "static IP octets must be 0–255";
+      if (!Number.isInteger(staticCidr) || staticCidr < 0 || staticCidr > 32) {
+        return "CIDR prefix must be an integer 0–32";
+      }
     }
-    return true;
+    return "";
+  }
+
+  // Reference the reactive inputs explicitly so Svelte tracks them and
+  // re-runs flashBlockReason() when any of them change. Without this list,
+  // Svelte can fail to invalidate `blockReason` when the user updates a
+  // field inside the dialog — leaving the user staring at a stale gate.
+  $: blockReason = (
+    flashing,
+    selectedTemplateId,
+    allTemplates,
+    vehicleName,
+    vehicleSlug,
+    wifiSsid,
+    wifiPassword,
+    ipMode,
+    staticIp,
+    staticCidr,
+    attachToVehicleId,
+    flashBlockReason()
+  );
+
+  function canFlash(): boolean {
+    return blockReason === "";
   }
 
   async function startFlash(): Promise<void> {
@@ -320,6 +382,7 @@
     flashReason = null;
     registryAddError = null;
     registryAddOk = false;
+    registryReused = false;
     logLines = [];
 
     const req: FlashStartRequest = {
@@ -373,24 +436,50 @@
     }
   }
 
+  // Find an existing vehicle by name (case-sensitive, post-trim) or create
+  // a new one. Re-flashing the same robot should be idempotent at the
+  // registry layer — we used to throw "already exists" and force the user
+  // to delete by hand. Returns the vehicle id and whether we created vs.
+  // reused so the UI can phrase the success message accurately.
+  async function findOrCreateVehicle(
+    name: string,
+    host: string
+  ): Promise<{ ok: boolean; vehicleId?: string; reused?: boolean; error?: string }> {
+    await fleet.refresh();
+    const trimmed = name.trim();
+    const existing = $fleet.vehicles.find((v) => v.name === trimmed);
+    if (existing) {
+      return { ok: true, vehicleId: existing.id, reused: true };
+    }
+    const addRes = await fleet.add({ name: trimmed, host });
+    if (!addRes.ok || !addRes.vehicle) {
+      return { ok: false, error: addRes.error ?? "vehicle create failed" };
+    }
+    return { ok: true, vehicleId: addRes.vehicle.id, reused: false };
+  }
+
+  // Tracks whether the most recent successful registry write was a fresh
+  // create or an update of an existing record. UI uses this to pick the
+  // right message ("Created" vs "Updated existing").
+  let registryReused = false;
+
   async function afterSuccessfulFlash(): Promise<void> {
     if (isVideoTemplate) {
       // Attach the camera sidecar to either an existing vehicle (attachToVehicleId)
-      // or to a freshly-created one.
+      // or to a freshly-created/reused one keyed by name.
       addingToRegistry = true;
       registryAddError = null;
       try {
         let targetId = attachToVehicleId;
+        let reused = !!attachToVehicleId;
         if (!targetId && vehicleName.trim()) {
-          const addRes = await fleet.add({
-            name: vehicleName.trim(),
-            host: resolvedHost,
-          });
-          if (!addRes.ok || !addRes.vehicle) {
-            registryAddError = addRes.error ?? "vehicle create failed";
+          const res = await findOrCreateVehicle(vehicleName, resolvedHost);
+          if (!res.ok || !res.vehicleId) {
+            registryAddError = res.error ?? "vehicle create failed";
             return;
           }
-          targetId = addRes.vehicle.id;
+          targetId = res.vehicleId;
+          reused = !!res.reused;
         }
         if (!targetId) {
           registryAddError = "no vehicle to attach the camera to";
@@ -406,6 +495,7 @@
           registryAddError = camRes.error ?? "camera attach failed";
           return;
         }
+        registryReused = reused;
         registryAddOk = true;
       } finally {
         addingToRegistry = false;
@@ -413,24 +503,22 @@
       return;
     }
 
-    // Drive board: create the vehicle and persist drive tuning.
+    // Drive board: find-or-create the vehicle and persist drive tuning.
     addingToRegistry = true;
     registryAddError = null;
     try {
-      const res = await fleet.add({
-        name: vehicleName.trim(),
-        host: resolvedHost,
-      });
-      if (!res.ok || !res.vehicle) {
+      const res = await findOrCreateVehicle(vehicleName, resolvedHost);
+      if (!res.ok || !res.vehicleId) {
         registryAddError = res.error ?? "add failed";
         return;
       }
       // Persist motor invert flags as drive tuning so they're reachable
       // from the CLI / Vehicles tab without re-flashing.
-      await fleet.setDrive(res.vehicle.id, {
+      await fleet.setDrive(res.vehicleId, {
         invertLeft: motorInvertLeft,
         invertRight: motorInvertRight,
       });
+      registryReused = !!res.reused;
       registryAddOk = true;
     } catch (err) {
       registryAddError = err instanceof Error ? err.message : String(err);
@@ -487,6 +575,9 @@
         <label>
           <span class="lbl">Template</span>
           <select bind:value={selectedTemplateId} disabled={flashing}>
+            {#if !selectedTemplateId}
+              <option value="" disabled>— pick a template —</option>
+            {/if}
             {#each filteredTemplates as t (t.id)}
               <option value={t.id}>{t.name}</option>
             {/each}
@@ -616,13 +707,39 @@
       {/if}
       <label>
         <span class="lbl">Password</span>
-        <input
-          type="password"
-          bind:value={wifiPassword}
-          on:input={() => markTouched("wifiPassword")}
-          placeholder="••••••••"
-          disabled={flashing}
-        />
+        <div class="password-wrap">
+          <input
+            type={wifiPasswordVisible ? "text" : "password"}
+            bind:value={wifiPassword}
+            on:input={() => markTouched("wifiPassword")}
+            placeholder="••••••••"
+            disabled={flashing}
+          />
+          <button
+            type="button"
+            class="reveal"
+            on:click={() => { wifiPasswordVisible = !wifiPasswordVisible; }}
+            aria-label={wifiPasswordVisible ? "Hide password" : "Show password"}
+            title={wifiPasswordVisible ? "Hide password" : "Show password"}
+            disabled={flashing}
+          >
+            {#if wifiPasswordVisible}
+              <!-- eye-off -->
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M17.94 17.94A10.94 10.94 0 0 1 12 20c-7 0-11-8-11-8a19.6 19.6 0 0 1 5.06-5.94" />
+                <path d="M9.9 4.24A11 11 0 0 1 12 4c7 0 11 8 11 8a19.6 19.6 0 0 1-3.17 4.19" />
+                <path d="M9.88 9.88a3 3 0 1 0 4.24 4.24" />
+                <line x1="1" y1="1" x2="23" y2="23" />
+              </svg>
+            {:else}
+              <!-- eye -->
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                <circle cx="12" cy="12" r="3" />
+              </svg>
+            {/if}
+          </button>
+        </div>
       </label>
     </section>
 
@@ -763,7 +880,7 @@
 
     <section class="actions">
       {#if !flashing}
-        <button class="flash" type="button" on:click={startFlash} disabled={!canFlash()}>
+        <button class="flash" type="button" on:click={startFlash} disabled={blockReason !== ""}>
           Flash {boardRole === "video" ? "video" : "drive"} board
         </button>
       {:else}
@@ -771,8 +888,11 @@
           Cancel
         </button>
       {/if}
-      {#if !selectedTemplate}
-        <span class="muted small">Select a template to flash.</span>
+      {#if !flashing && blockReason}
+        <span class="block-reason" role="status" aria-live="polite">
+          <span class="block-icon" aria-hidden="true">!</span>
+          {blockReason}
+        </span>
       {/if}
     </section>
 
@@ -789,7 +909,9 @@
             <p class="muted small">Flash succeeded. Updating vehicle registry…</p>
           {:else if registryAddOk}
             <p class="ok">
-              Flashed and registered.
+              {registryReused
+                ? `Flashed. Updated existing vehicle "${vehicleName.trim()}" — host left untouched so you don't lose the .local name or static IP you'd already set.`
+                : "Flashed and registered."}
               <button class="link" type="button" on:click={close}>Back to Devices →</button>
             </p>
           {:else if registryAddError}
@@ -907,6 +1029,42 @@
     outline: none;
     border-color: var(--accent);
   }
+  .password-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+  }
+  .password-wrap input {
+    /* Reserve room for the reveal button so the dots don't slide under it. */
+    padding-right: 2.25rem;
+  }
+  .reveal {
+    position: absolute;
+    right: 0.35rem;
+    top: 50%;
+    transform: translateY(-50%);
+    background: transparent;
+    border: none;
+    color: var(--muted);
+    padding: 0.25rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+  }
+  .reveal:hover:not(:disabled) {
+    color: var(--fg);
+    background: var(--surface-2, #1c232c);
+  }
+  .reveal:focus-visible {
+    outline: none;
+    color: var(--accent);
+  }
+  .reveal:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
   .radio-row {
     display: flex;
     gap: 1rem;
@@ -974,6 +1132,26 @@
     font-size: 0.9rem;
     font-weight: 600;
     cursor: pointer;
+  }
+  .block-reason {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--warn, #d29922);
+    font-size: 0.8rem;
+  }
+  .block-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--warn, #d29922);
+    color: #0d1117;
+    font-weight: 700;
+    font-size: 0.7rem;
+    line-height: 1;
   }
   .log {
     background: #0d1117;

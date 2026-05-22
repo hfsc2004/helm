@@ -34,7 +34,12 @@ function createWindow(): void {
       preload: join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true,
+      // Sandbox stays on in packaged builds (defense-in-depth against a
+      // compromised renderer), but in dev we want native clipboard paste
+      // in DevTools — sandbox blocks the synchronous clipboard path the
+      // dev-tools context menu uses. The threat model doesn't apply when
+      // the developer is the one typing into their own console.
+      sandbox: !isDev,
     },
   });
 

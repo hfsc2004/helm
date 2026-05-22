@@ -1,6 +1,6 @@
 {
   "name": "psf-helm",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Drive your robot truck — or fly your drone — by telling it what to do. PSF Helm is a local-first desktop app that pairs natural-language control with any llama.cpp model, runs entirely on your machine, and stays out of the cloud.",
   "author": "Pseudo Science Fiction",
   "license": "Apache-2.0",

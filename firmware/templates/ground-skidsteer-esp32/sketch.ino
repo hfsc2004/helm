@@ -305,14 +305,23 @@ void handleCmd() {
   right = constrain(right, -MAX_SPEED, MAX_SPEED);
 
   // Collision guard: refresh from latest sensor reads, then refuse the
-  // command if it would drive us into a wall. Only blocks "both wheels
-  // same direction" — in-place turns and stops always pass so the
-  // operator can escape a pinned position. The deadman keeps the
-  // previous command alive when this returns ok:false, so the motors
-  // still time out and stop within DEADMAN_MS.
+  // command if it would drive the chassis into something.
+  //
+  // The guard has to ask "will the chassis physically translate forward
+  // or backward" — NOT "are the raw command signs both positive". This
+  // robot's motors are mounted in matching rotational direction (both
+  // cw → spin) rather than mirror-symmetric (left ccw + right cw →
+  // translate), so equal-sign PWM spins and opposite-sign PWM
+  // translates. Empirically: left<0, right>0 drives the chassis forward;
+  // the opposite pair drives it backward; equal-sign is always an
+  // in-place spin (allowed as the escape hatch).
+  //
+  // TODO: lift this to a per-chassis config when we add a second robot
+  // whose motors are mounted the conventional mirror-symmetric way.
+  // Right now it's hard-coded for the Truck so the guard is real.
   updateGuards(readIrAveraged(IR_PIN_FC), readIrAveraged(IR_PIN_RR));
-  const bool wantForward = (left > 0 && right > 0);
-  const bool wantReverse = (left < 0 && right < 0);
+  const bool wantForward = (left < 0 && right > 0);
+  const bool wantReverse = (left > 0 && right < 0);
   if (wantForward && gGuardForwardBlocked) {
     server.send(409, "application/json",
       "{\"ok\":false,\"blocked\":\"forward\",\"reason\":\"front IR over threshold\"}");

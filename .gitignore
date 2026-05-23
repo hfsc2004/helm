@@ -44,6 +44,14 @@ logs/
 Thumbs.db
 desktop.ini
 
+# AI coding CLI session/settings dirs (per-user tool state, not project content)
+.claude/
+.codex/
+.cursor/
+.aider*
+.gemini/
+.grok/
+
 # Coverage / test artifacts
 coverage/
 .nyc_output/

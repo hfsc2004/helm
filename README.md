@@ -363,9 +363,9 @@ The recipe — works for any of: Claude Code (`claude`), OpenAI Codex CLI (`code
 
     Ask it to read the project so it knows what tools are available:
 
-    > "Read README.md and any other `*.md` files in this repo so you understand what PSF Helm is and what CLI commands are available. Then summarize back to me what you'd use to drive a robot."
+    > "Read `AGENTS.md` (it's written specifically for you), then summarize back to me how you would drive the robot and what safety rules you'll follow."
 
-    The model will read the markdown, learn that `helm vehicle-snapshot`, `helm cmd`, `helm stop`, and `helm describe` exist, and tell you it's ready. If it doesn't mention paired telemetry or the collision guard, ask it to re-read this section — those are the two things it needs to drive safely.
+    `AGENTS.md` is the LLM-facing operator manual — hard rules, the 3-command Captain loop, full telemetry interpretation, the IR-reading cheat sheet, and a catalog of every CLI command the model needs (`helm cmd`, `helm stop`, `helm vehicle-snapshot`, `helm state`, `helm describe`) in the priority order it should reach for them. It also documents the failure modes previous Captains have run into on this hardware, so the model doesn't have to learn them the hard way. Codex, Cursor, Claude Code, and Grok all auto-load `AGENTS.md` on session start, so the model has likely already read it before you even ask — confirming with a "summarize what you read" prompt is just a sanity check.
 
 3. **In terminal #2**, from the same project directory, start Helm-UI:
 

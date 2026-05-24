@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Pseudo Science Fiction
 import { createHash } from "node:crypto";
 import { createReadStream, statSync } from "node:fs";
 

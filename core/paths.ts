@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Pseudo Science Fiction
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { env } from "node:process";

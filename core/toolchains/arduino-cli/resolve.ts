@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Pseudo Science Fiction
 import { existsSync } from "node:fs";
 
 import { runCommandAsync } from "../process.js";

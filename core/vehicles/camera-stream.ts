@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Pseudo Science Fiction
 /**
  * One persistent connection per vehicle to its MJPEG `/stream` endpoint,
  * with a multipart demuxer that pulls each JPEG frame out and caches the

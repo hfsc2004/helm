@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Pseudo Science Fiction
 /**
  * Hardware detection — verbatim import from PSF Core.
  *

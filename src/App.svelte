@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Copyright 2026 Pseudo Science Fiction -->
 <script lang="ts">
   import DriverView from "./views/DriverView.svelte";
   import VehiclesView from "./views/VehiclesView.svelte";

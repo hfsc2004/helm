@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Pseudo Science Fiction
 import { spawn } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname } from "node:path";

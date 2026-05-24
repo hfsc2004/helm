@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Pseudo Science Fiction
 /**
  * Vehicle contract — the shape of "a thing PSF Helm can control."
  *

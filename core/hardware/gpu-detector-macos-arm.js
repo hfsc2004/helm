@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Pseudo Science Fiction
 /**
  * Pseudo Science Fiction Core Collection - GPU Detector Module
  * MACOS ARM (APPLE SILICON) IMPLEMENTATION

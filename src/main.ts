@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Pseudo Science Fiction
 import { mount } from "svelte";
 import App from "./App.svelte";
 import "./app.css";

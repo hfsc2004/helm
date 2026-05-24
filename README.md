@@ -543,7 +543,7 @@ Cross-platform target is Linux, macOS, and Windows. Linux x64 is what currently 
 
 ## License
 
-Apache-2.0 (planned). See `LICENSE`.
+Licensed under the Apache License, Version 2.0. See [`LICENSE`](LICENSE).
 
 ## What PSF Helm does NOT do
 

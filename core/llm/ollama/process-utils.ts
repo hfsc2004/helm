@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Pseudo Science Fiction
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 

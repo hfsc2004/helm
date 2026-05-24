@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Pseudo Science Fiction
 import { HELM_OLLAMA_PORT } from "./env.js";
 import type { ChatMessage, ChatStreamChunk } from "../../../shared/llm.js";
 

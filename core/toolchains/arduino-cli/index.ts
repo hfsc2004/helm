@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Pseudo Science Fiction
 /**
  * arduino-cli toolchain — Helm's private installation, isolated from any
  * system Arduino IDE or arduino-cli the user may already have.

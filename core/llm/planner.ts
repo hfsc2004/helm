@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Pseudo Science Fiction
 import type { Vehicle, SkidSteerAction } from "../../shared/vehicle-contract.js";
 import { COMMAND_LIMITS } from "../../shared/vehicle-contract.js";
 import { chat } from "./ollama/chat.js";

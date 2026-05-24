@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Pseudo Science Fiction
 /**
  * Pseudo Science Fiction Core Collection - GPU Detector
  * Platform router - detects OS/architecture and loads appropriate module

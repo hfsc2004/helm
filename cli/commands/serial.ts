@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Pseudo Science Fiction
 import { emit } from "../output.js";
 import { register, type RuntimeCommand } from "../registry.js";
 import { COMMON_EXIT_CODES } from "../../core/schema.js";

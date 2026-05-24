@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Pseudo Science Fiction
 import { existsSync, rmSync } from "node:fs";
 
 import type { VoiceInstallState } from "../../shared/voice.js";

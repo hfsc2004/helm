@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Pseudo Science Fiction
 import { app, BrowserWindow } from "electron";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";

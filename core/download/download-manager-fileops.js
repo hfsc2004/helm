@@ -1,8 +1,6 @@
-/**
- *
- * @version 1.1.3 - March 5, 2026
- * @copyright 2026 Pseudo SF
- */
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Pseudo Science Fiction
+// @version 1.1.3 - March 5, 2026
 const fs = require('fs');
 const path = require('path');
 const { parseSplitFilename } = require('./download-manager-split');

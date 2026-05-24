@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Pseudo Science Fiction
 # PSF Helm — one-time dependency installer (Linux / macOS)
 #
 # Run this once after cloning the repo, or any time package.json changes.

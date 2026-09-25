@@ -3,6 +3,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { fleet, vehicleState } from "../stores/vehicles";
+  import { hasDriveControl } from "@shared/vehicle-contract";
 
   // VehiclePicker lives in the global header — it shouldn't auto-start
   // the telemetry stream just because the app opened. Stream lifecycle
@@ -24,7 +25,8 @@
     $vehicleState.vehicleId !== null &&
     $vehicleState.vehicleId !== selected.id
   ) {
-    void vehicleState.start(selected.id);
+    if (hasDriveControl(selected)) void vehicleState.start(selected.id);
+    else void vehicleState.stop();
   }
 
   function onSelect(event: Event) {
@@ -45,7 +47,9 @@
     </select>
     {#if selected}
       <span class="meta">·</span>
-      <span class="meta">{selected.transport.host}:{selected.transport.port}</span>
+      <span class="meta">{hasDriveControl(selected) && selected.transport
+        ? `${selected.transport.host}:${selected.transport.port}`
+        : selected.camera?.baseUrl ?? "camera only"}</span>
     {/if}
   {/if}
 </div>

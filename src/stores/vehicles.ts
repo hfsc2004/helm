@@ -28,7 +28,7 @@ const helm = (): Window["helm"] => {
 function createFleetStore(): Writable<FleetState> & {
   refresh: () => Promise<void>;
   select: (id: string | null) => void;
-  add: (input: { name: string; host: string; port?: number }) => Promise<{
+  add: (input: { name: string; host?: string; port?: number; cameraOnly?: boolean }) => Promise<{
     ok: boolean;
     vehicle?: Vehicle;
     error?: string;

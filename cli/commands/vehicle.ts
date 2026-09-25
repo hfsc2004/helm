@@ -5,6 +5,7 @@ import { register, type RuntimeCommand } from "../registry.js";
 import { COMMON_EXIT_CODES } from "../../core/schema.js";
 import * as registry from "../../core/vehicles/registry.js";
 import * as adapter from "../../core/vehicles/ground-skidsteer.js";
+import { hasDriveControl } from "../../shared/vehicle-contract.js";
 
 const vehicleList: RuntimeCommand = {
   def: {
@@ -145,6 +146,19 @@ const vehicleHealth: RuntimeCommand = {
       return 1;
     }
     try {
+      if (!hasDriveControl(vehicle)) {
+        if (!vehicle.camera) {
+          emit({ ok: false, reachable: false, error: "no camera endpoint configured" });
+          return 2;
+        }
+        const path = vehicle.camera.flashStatusPath ?? "/health";
+        const res = await fetch(`${vehicle.camera.baseUrl.replace(/\/$/, "")}${path}`, {
+          signal: AbortSignal.timeout(5000),
+        });
+        const health = await res.json();
+        emit({ ok: res.ok, reachable: res.ok, health, endpoint: "camera" });
+        return res.ok ? 0 : 2;
+      }
       const health = await adapter.health(vehicle);
       if (!health) {
         emit({ ok: false, reachable: false });

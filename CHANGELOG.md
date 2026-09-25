@@ -5,6 +5,23 @@ All notable changes to PSF Helm will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-09-25
+
+### Fixed
+- Treat PSF Sensor Board v1.3 as a single camera/sensor board during bring-up:
+  no nonexistent drive-board telemetry poll, motor controls, or misleading
+  "Vehicle unreachable" warning. New v1.3 registrations are camera-only.
+- Recover stalled camera streams and serialize UI snapshot polls so a lost
+  connection does not leave the last few images frozen indefinitely.
+- Check the v1.3 camera endpoint for `vehicle-health` and omit drive telemetry
+  from camera-only snapshots.
+
+### Notes
+- First hardware test confirmed Wi-Fi camera capture and MJPEG streaming.
+  The I²C scan found no devices; ToF/IMU/audio are still bring-up work.
+- On networks where `.local` resolution is intermittent, use the board's
+  current IP for the camera URL or reserve its address on the router.
+
 ## [0.3.0] - 2026-09-25
 
 ### Added

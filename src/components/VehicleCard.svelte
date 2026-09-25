@@ -4,7 +4,7 @@
   import { fleet } from "../stores/vehicles";
   import { activeView } from "../stores/view";
   import type { DriveMapTarget, SensorBoardRevision, Vehicle } from "@shared/vehicle-contract";
-  import { DRIVE_TUNING_DEFAULTS } from "@shared/vehicle-contract";
+  import { DRIVE_TUNING_DEFAULTS, hasDriveControl } from "@shared/vehicle-contract";
 
   export let vehicle: Vehicle;
 
@@ -180,11 +180,12 @@
     </div>
     <button class="drive-btn" on:click={driveThis}>
       <span class="play">▸</span>
-      Drive
+      {hasDriveControl(vehicle) ? "Drive" : "View"}
     </button>
   </header>
 
   <section class="rows">
+    {#if hasDriveControl(vehicle) && vehicle.transport}
     <div class="row">
       <span class="label">Endpoint</span>
       <span class="val mono">{vehicle.transport.host}:{vehicle.transport.port}</span>
@@ -193,6 +194,7 @@
       <span class="label">Loss-of-comms</span>
       <span class="val">{vehicle.lossOfCommsBehavior}</span>
     </div>
+    {/if}
   </section>
 
   <section class="sidecars">
@@ -313,6 +315,7 @@
     </div>
   </section>
 
+  {#if hasDriveControl(vehicle)}
   <section class="tuning">
     <button
       class="disclosure"
@@ -390,6 +393,7 @@
       </div>
     {/if}
   </section>
+  {/if}
 
   {#if error}
     <p class="error">{error}</p>

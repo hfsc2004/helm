@@ -249,9 +249,10 @@ export interface HardwareInfo {
 
 export interface VehicleAddRequest {
   name: string;
-  host: string;
+  host?: string;
   port?: number;
   kind?: "ground" | "air";
+  cameraOnly?: boolean;
 }
 
 export interface VehicleRemoveRequest {

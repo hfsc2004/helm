@@ -7,6 +7,7 @@ import type {
   Vehicle,
 } from "../../shared/vehicle-contract.js";
 import { COMMAND_LIMITS } from "../../shared/vehicle-contract.js";
+import { hasDriveControl } from "../../shared/vehicle-contract.js";
 
 /**
  * Adapter for the ESP32 skid-steer firmware in firmware/ground-skidsteer/.
@@ -55,6 +56,9 @@ export interface CommandAck {
 }
 
 function baseUrl(vehicle: Vehicle): string {
+  if (!vehicle.transport || vehicle.sensorBoardRevision === "1.3") {
+    throw new Error("no drive endpoint configured for this vehicle");
+  }
   return `http://${vehicle.transport.host}:${vehicle.transport.port}`;
 }
 
@@ -287,6 +291,10 @@ export async function sendCommand(
   action: SkidSteerAction,
   opts: RequestOptions = {}
 ): Promise<CommandAck> {
+  if (!hasDriveControl(vehicle)) {
+    if (action.kind === "stop") return { ok: true };
+    throw new Error("no drive endpoint configured for this vehicle");
+  }
   const rotated = rotate90CCW(action);
   const effective = applyDriveTuning(rotated, vehicle.drive);
   const url = `${baseUrl(vehicle)}${buildPath(effective)}`;

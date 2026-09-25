@@ -452,7 +452,8 @@
   // reused so the UI can phrase the success message accurately.
   async function findOrCreateVehicle(
     name: string,
-    host: string
+    host: string,
+    cameraOnly = false
   ): Promise<{ ok: boolean; vehicleId?: string; reused?: boolean; error?: string }> {
     await fleet.refresh();
     const trimmed = name.trim();
@@ -460,7 +461,7 @@
     if (existing) {
       return { ok: true, vehicleId: existing.id, reused: true };
     }
-    const addRes = await fleet.add({ name: trimmed, host });
+    const addRes = await fleet.add(cameraOnly ? { name: trimmed, cameraOnly: true } : { name: trimmed, host });
     if (!addRes.ok || !addRes.vehicle) {
       return { ok: false, error: addRes.error ?? "vehicle create failed" };
     }
@@ -482,7 +483,7 @@
         let targetId = attachToVehicleId;
         let reused = !!attachToVehicleId;
         if (!targetId && vehicleName.trim()) {
-          const res = await findOrCreateVehicle(vehicleName, resolvedHost);
+          const res = await findOrCreateVehicle(vehicleName, resolvedHost, isSensorBoardV13);
           if (!res.ok || !res.vehicleId) {
             registryAddError = res.error ?? "vehicle create failed";
             return;
@@ -612,17 +613,18 @@
 
     {#if isVideoTemplate}
       <section>
-        <h3>Attach to vehicle</h3>
-        <p class="muted small">
-          The camera sidecar attaches to a vehicle by its IP. Pick an existing one,
-          or leave blank and we'll create a new vehicle with the name below.
-        </p>
+        <h3>{isSensorBoardV13 ? "Sensor-board vehicle" : "Attach to vehicle"}</h3>
+        {#if isSensorBoardV13}
+          <p class="muted small">This v1.3 image is camera/sensor bring-up only. Choose an existing vehicle or create a new camera-only vehicle; Helm will not expect a separate drive board.</p>
+        {:else}
+          <p class="muted small">The camera sidecar attaches to a vehicle by its IP. Pick an existing one, or leave blank and we'll create a new vehicle with the name below.</p>
+        {/if}
         <label>
           <span class="lbl">Existing vehicle (optional)</span>
           <select bind:value={attachToVehicleId} disabled={flashing}>
             <option value="">— create new vehicle —</option>
             {#each fleetVehicles as v (v.id)}
-              <option value={v.id}>{v.name} ({v.transport.host})</option>
+              <option value={v.id}>{v.name} ({v.transport?.host ?? v.camera?.baseUrl ?? "camera only"})</option>
             {/each}
           </select>
         </label>

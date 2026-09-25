@@ -19,9 +19,10 @@
 
   let imgEl: HTMLImageElement | null = null;
   let currentObjectUrl: string | null = null;
-  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let consumerId: string | null = null;
   let openVehicleId: string | null = null;
+  let generation = 0;
   let lastCapturedAt = 0;
   // Track how long the feed has been stuck on the same frame. We never
   // paint the underlying error text on top of the live image (that was
@@ -29,7 +30,7 @@
   // appears in the corner so the user knows it isn't fresh.
   let stale = false;
   let consecutiveErrors = 0;
-  const STALE_THRESHOLD = 30; // ~2s at the 66ms poll cadence
+  const STALE_THRESHOLD = 3; // reconnect after three failed or unchanged polls
 
   $: selected = $fleet.vehicles.find((v) => v.id === $fleet.selectedId) ?? null;
   $: hasCamera = !!selected?.camera;
@@ -43,25 +44,54 @@
   ): Promise<void> {
     if (openVehicleId === (vehicleId ?? null) && consumerId !== null) return;
     await teardown();
-    if (!vehicleId || !cameraConfigured) return;
+    if (!vehicleId || !cameraConfigured || selected?.id !== vehicleId) return;
     await openStream(vehicleId);
   }
 
   async function openStream(vehicleId: string): Promise<void> {
+    const currentGeneration = generation;
     consecutiveErrors = 0;
     stale = false;
+    lastCapturedAt = 0;
     try {
       const handle = await window.helm.vehicle.cameraStreamOpen({ vehicleId });
+      if (generation !== currentGeneration) {
+        await window.helm.vehicle.cameraStreamClose(handle.consumerId);
+        return;
+      }
       consumerId = handle.consumerId;
       openVehicleId = vehicleId;
       // First pull gets a generous timeout so the UI doesn't blink stale
       // while the upstream connection is still negotiating.
       await pollOnce(FIRST_FRAME_TIMEOUT_MS);
-      pollTimer = setInterval(() => void pollOnce(2000), POLL_INTERVAL_MS);
+      if (generation === currentGeneration) schedulePoll(currentGeneration, vehicleId);
     } catch {
-      // Swallowed — the worst we do visually is keep showing the last
-      // good frame with the STALE badge. The teardown happens on unmount.
+      registerError();
+      stale = true;
+      if (generation === currentGeneration) {
+        pollTimer = setTimeout(() => void reconnect(vehicleId), 1000);
+      }
     }
+  }
+
+  function schedulePoll(currentGeneration: number, vehicleId: string): void {
+    pollTimer = setTimeout(async () => {
+      if (generation !== currentGeneration) return;
+      // Await each IPC snapshot before scheduling the next. A setInterval at
+      // 15 Hz could pile up requests when the camera or mDNS stalled.
+      await pollOnce(2000);
+      if (generation !== currentGeneration) return;
+      if (consecutiveErrors >= 3) {
+        await reconnect(vehicleId);
+      } else {
+        schedulePoll(currentGeneration, vehicleId);
+      }
+    }, POLL_INTERVAL_MS);
+  }
+
+  async function reconnect(vehicleId: string): Promise<void> {
+    await teardown();
+    if (selected?.id === vehicleId && hasCamera) await openStream(vehicleId);
   }
 
   function registerError(): void {
@@ -88,7 +118,10 @@
         return;
       }
       // Skip if this is the same frame we already showed.
-      if (res.capturedAt && res.capturedAt === lastCapturedAt) return;
+      if (res.capturedAt && res.capturedAt === lastCapturedAt) {
+        if (Date.now() - lastCapturedAt > 3000) registerError();
+        return;
+      }
       lastCapturedAt = res.capturedAt ?? Date.now();
 
       const bytes = base64ToBytes(res.base64);
@@ -113,8 +146,9 @@
   }
 
   async function teardown(): Promise<void> {
+    generation++;
     if (pollTimer) {
-      clearInterval(pollTimer);
+      clearTimeout(pollTimer);
       pollTimer = null;
     }
     if (consumerId !== null) {

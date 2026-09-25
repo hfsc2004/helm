@@ -12,12 +12,18 @@
   import CameraFeed from "../components/CameraFeed.svelte";
   import AudioFeed from "../components/AudioFeed.svelte";
   import ActivityLog from "../components/ActivityLog.svelte";
+  import { hasDriveControl } from "@shared/vehicle-contract";
+
+  $: selectedVehicle = $fleet.vehicles.find((v) => v.id === $fleet.selectedId) ?? null;
+  $: canDrive = selectedVehicle ? hasDriveControl(selectedVehicle) : false;
 
   // Start the telemetry stream only while the Driver view is mounted, and
   // only against the currently-selected vehicle. Closing this tab tears it
   // down so an idle Helm-UI never polls /telemetry on the LAN.
-  $: if ($fleet.selectedId && $vehicleState.vehicleId !== $fleet.selectedId) {
+  $: if (canDrive && $fleet.selectedId && $vehicleState.vehicleId !== $fleet.selectedId) {
     void vehicleState.start($fleet.selectedId);
+  } else if (!canDrive && $vehicleState.vehicleId !== null) {
+    void vehicleState.stop();
   }
   onDestroy(() => {
     void vehicleState.stop();
@@ -30,7 +36,7 @@
       <CameraFeed />
     </div>
     <AudioFeed />
-    <IntentBar />
+    {#if canDrive}<IntentBar />{/if}
   </div>
 
   <aside class="rail">
@@ -41,6 +47,8 @@
           <code>npm run helm -- vehicle-add &lt;host&gt; --name &lt;name&gt;</code>
         </p>
       </section>
+    {:else if !canDrive}
+      <section><p class="muted">PSF Sensor Board v1.3 bring-up: camera only. Motor controls and drive telemetry are not available in this firmware.</p></section>
     {:else}
       {#if $inputMode === "gamepad"}
         <Gamepad />

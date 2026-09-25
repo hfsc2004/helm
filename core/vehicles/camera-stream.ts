@@ -357,6 +357,7 @@ export function peek(vehicleId: string): {
   startedAt: number;
   lastError: string | null;
   hasFrame: boolean;
+  lastFrameAt: number | null;
 } | null {
   const rec = streams.get(vehicleId);
   if (!rec) return null;
@@ -368,5 +369,21 @@ export function peek(vehicleId: string): {
     startedAt: rec.startedAt,
     lastError: rec.lastError,
     hasFrame: rec.lastFrame !== null,
+    lastFrameAt: rec.lastFrame?.capturedAt ?? null,
   };
+}
+
+/** Drop a stalled upstream connection so the next acquire starts fresh. */
+export function invalidate(vehicleId: string): void {
+  const rec = streams.get(vehicleId);
+  if (!rec) return;
+  streams.delete(vehicleId);
+  rec.controller.abort();
+  void bmoc.closeSession(rec.sessionId).catch(() => undefined);
+}
+
+export function isStalled(vehicleId: string, maxAgeMs = 3000): boolean {
+  const rec = peek(vehicleId);
+  if (!rec) return false;
+  return Date.now() - (rec.lastFrameAt ?? rec.startedAt) > maxAgeMs;
 }

@@ -13,14 +13,15 @@
  * - The command shape is a tagged union per `Action`. Each vehicle's
  *   capabilities determine which actions it accepts.
  *
- * Dual-board layout (drive + video):
+ * Legacy dual-board layout (drive + video):
  * - `transport` is the *drive* board (typically an ESP32) — its own IP/port
  *   on the LAN, its own Wi-Fi creds in `wifi.drive`, its own flash params
  *   in `flash.drive`.
  * - `camera` is the *video* board (typically an ESP32-S3) — its own IP/port,
  *   its own creds in `wifi.video`, its own flash params in `flash.video`.
- * - The two boards run independently; either can be present without the
- *   other. The runtime endpoints (`transport`, `camera`) are what Helm
+ * - PSF Sensor Board v1.3 currently runs alone as a camera/sensor board.
+ *   Its bring-up firmware has no motor or drive telemetry endpoint.
+ * - The runtime endpoints (`transport`, `camera`) are what Helm
  *   talks to at drive time; `wifi.*` and `flash.*` are install-time config
  *   the user supplied so we can re-flash or document the vehicle later.
  */
@@ -47,6 +48,12 @@ export type BoardRole = "drive" | "video";
 
 /** Installed GSN Robotics / PSF Sensor Board hardware revision. */
 export type SensorBoardRevision = "1.1" | "1.3";
+
+/** The v1.3 bring-up firmware has camera endpoints but no drive endpoint. */
+export function hasDriveControl(vehicle: Vehicle): boolean {
+  return vehicle.sensorBoardRevision !== "1.3" &&
+    !!vehicle.transport && vehicle.capabilities.includes("drive.skidsteer");
+}
 
 export interface StaticIpConfig {
   ip: string;
@@ -133,8 +140,8 @@ export interface Vehicle {
   sensorBoardRevision?: SensorBoardRevision;
   kind: VehicleKind;
   capabilities: VehicleCapability[];
-  /** Drive board runtime endpoint. */
-  transport: {
+  /** Drive-board runtime endpoint; absent for camera-only vehicles. */
+  transport?: {
     host: string;
     port: number;
   };

@@ -105,6 +105,7 @@ async function handleSnapshot(
 
   // Prefer the cached frame from the shared stream when something is
   // already holding /stream open (the Drive view, typically).
+  if (cameraStream.isStalled(vehicle.id)) cameraStream.invalidate(vehicle.id);
   const existing = cameraStream.peek(vehicle.id);
   if (existing) {
     const handle = cameraStream.acquire(vehicle);
@@ -123,15 +124,13 @@ async function handleSnapshot(
         "x-helm-vehicle-name": vehicle.name,
       });
       res.end(Buffer.from(frame.bytes));
-    } catch (err) {
-      json(res, 502, {
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
-      });
+    } catch {
+      // The stream can fail after the renderer acquires it. Drop the stale
+      // connection and try /capture rather than returning its old failure.
+      cameraStream.invalidate(vehicle.id);
     } finally {
       await handle.release();
     }
-    return;
   }
 
   // No stream open — hit /capture directly.

@@ -9,6 +9,7 @@ import { COMMON_EXIT_CODES } from "../../core/schema.js";
 import * as registry from "../../core/vehicles/registry.js";
 import * as adapter from "../../core/vehicles/ground-skidsteer.js";
 import * as cp from "../../core/control-plane/client.js";
+import { hasDriveControl } from "../../shared/vehicle-contract.js";
 
 /**
  * Pull a single JPEG snapshot from a vehicle's camera sidecar.
@@ -174,7 +175,7 @@ const vehicleSnapshot: RuntimeCommand = {
       ok: boolean;
       data?: Record<string, unknown>;
       error?: string;
-    }> | null = skipTelemetry
+    }> | null = skipTelemetry || !hasDriveControl(vehicle)
       ? null
       : adapter
           .getState(vehicle, { timeoutMs })

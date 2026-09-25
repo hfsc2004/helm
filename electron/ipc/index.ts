@@ -29,6 +29,7 @@ import type {
   DriveFlashConfig,
   VideoFlashConfig,
 } from "../../shared/vehicle-contract.js";
+import { hasDriveControl } from "../../shared/vehicle-contract.js";
 
 import * as registry from "../../core/vehicles/registry.js";
 import * as adapter from "../../core/vehicles/ground-skidsteer.js";
@@ -74,6 +75,7 @@ export function registerIpcHandlers(opts: { version: string }): void {
         host: req.host,
         port: req.port,
         kind: req.kind,
+        cameraOnly: req.cameraOnly,
       });
       return { ok: true, vehicle: v };
     } catch (err) {
@@ -199,6 +201,7 @@ export function registerIpcHandlers(opts: { version: string }): void {
       const timeoutMs = Math.max(100, req.timeoutMs ?? 8000);
 
       // Preferred path: the renderer already has a stream open. Reuse it.
+      if (cameraStream.isStalled(vehicle.id)) cameraStream.invalidate(vehicle.id);
       const existing = cameraStream.peek(vehicle.id);
       if (existing) {
         const handle = cameraStream.acquire(vehicle);
@@ -215,8 +218,10 @@ export function registerIpcHandlers(opts: { version: string }): void {
             capturedAt: frame.capturedAt,
             source: "cache",
           };
-        } catch (err) {
-          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        } catch {
+          // A dead MJPEG connection must not strand the UI. Close it and
+          // try the board's one-shot capture endpoint below.
+          cameraStream.invalidate(vehicle.id);
         } finally {
           await handle.release();
         }
@@ -256,6 +261,7 @@ export function registerIpcHandlers(opts: { version: string }): void {
   ipcMain.handle(IPC.vehicle.cmd, async (_e, req: VehicleCmdRequest) => {
     const vehicle = registry.get(req.vehicleId);
     if (!vehicle) return { ok: false, error: `no vehicle ${req.vehicleId}` };
+    if (!hasDriveControl(vehicle)) return { ok: false, error: "no drive endpoint configured for this vehicle" };
     try {
       const ack = await adapter.sendCommand(vehicle, req.action);
       return { ok: ack.ok, ack };
@@ -270,6 +276,7 @@ export function registerIpcHandlers(opts: { version: string }): void {
   ipcMain.handle(IPC.vehicle.stop, async (_e, req: VehicleStopRequest) => {
     const vehicle = registry.get(req.vehicleId);
     if (!vehicle) return { ok: false, error: `no vehicle ${req.vehicleId}` };
+    if (!hasDriveControl(vehicle)) return { ok: true, ack: { ok: true } };
     try {
       const ack = await adapter.emergencyStop(vehicle);
       return { ok: ack.ok, ack };
@@ -286,6 +293,9 @@ export function registerIpcHandlers(opts: { version: string }): void {
     const vehicle = registry.get(req.vehicleId);
     if (!vehicle) {
       throw new Error(`no vehicle ${req.vehicleId}`);
+    }
+    if (!hasDriveControl(vehicle)) {
+      throw new Error("no drive telemetry endpoint configured for this vehicle");
     }
     // Default 2000ms. The drive board is a single-threaded ESP32 — at the
     // old 500ms cadence, telemetry polls competed with /cmd hold-drive

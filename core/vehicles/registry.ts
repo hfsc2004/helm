@@ -42,6 +42,15 @@ function load(): RegistryFile {
     if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.vehicles)) {
       return { schemaVersion: 1, vehicles: [] };
     }
+    // Earlier v1.3 flashes reused a drive-board entry. Keep its old endpoint
+    // data for reversibility, but do not advertise unavailable motor APIs.
+    for (const vehicle of parsed.vehicles) {
+      if (vehicle.sensorBoardRevision === "1.3") {
+        vehicle.capabilities = vehicle.capabilities.filter(
+          (capability) => capability !== "drive.skidsteer" && capability !== "state.basic"
+        );
+      }
+    }
     return parsed;
   } catch {
     // Corrupt file — preserve nothing, return empty registry. The user can
@@ -82,12 +91,17 @@ export function findByName(name: string): Vehicle | null {
 
 export interface AddVehicleInput {
   name: string;
-  host: string;
+  host?: string;
   port?: number;
   kind?: "ground" | "air";
+  /** v1.3 camera/sensor bring-up has no drive HTTP endpoint. */
+  cameraOnly?: boolean;
 }
 
 export function add(input: AddVehicleInput): Vehicle {
+  if (!input.cameraOnly && !input.host?.trim()) {
+    throw new Error("A drive vehicle requires a host.");
+  }
   const file = load();
   if (file.vehicles.length >= STORAGE_LIMITS.registryVehicles) {
     throw new Error(
@@ -101,11 +115,10 @@ export function add(input: AddVehicleInput): Vehicle {
     id: `veh_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     name: input.name,
     kind: input.kind ?? "ground",
-    capabilities: ["drive.skidsteer", "state.basic"],
-    transport: {
-      host: input.host,
-      port: input.port ?? 8080,
-    },
+    capabilities: input.cameraOnly ? [] : ["drive.skidsteer", "state.basic"],
+    ...(input.cameraOnly ? {} : {
+      transport: { host: input.host!.trim(), port: input.port ?? 8080 },
+    }),
     coordinateFrame: "raw",
     lossOfCommsBehavior: "stop",
     addedAt: Date.now(),
@@ -180,8 +193,17 @@ export function setSensorBoardRevision(
     throw new Error("Sensor board revision must be 1.1 or 1.3.");
   }
   return mutate(id, (vehicle) => {
+    const previous = vehicle.sensorBoardRevision;
     if (revision === null) delete vehicle.sensorBoardRevision;
     else vehicle.sensorBoardRevision = revision;
+    if (revision === "1.3") {
+      vehicle.capabilities = vehicle.capabilities.filter(
+        (capability) => capability !== "drive.skidsteer" && capability !== "state.basic"
+      );
+    } else if (previous === "1.3" && vehicle.transport) {
+      if (!vehicle.capabilities.includes("drive.skidsteer")) vehicle.capabilities.push("drive.skidsteer");
+      if (!vehicle.capabilities.includes("state.basic")) vehicle.capabilities.push("state.basic");
+    }
   });
 }
 

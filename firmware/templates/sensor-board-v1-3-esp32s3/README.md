@@ -3,7 +3,8 @@
 This is the first **bench bring-up** image for the ESP32-S3-CAM mounted on the
 GSN Robotics / PSF Sensor Board v1.3. It keeps the existing Helm camera API and
 adds diagnostics that remain reachable while MJPEG is streaming. It does not
-change drive-board firmware or motor behavior.
+provide a drive endpoint or motor controls; no separate drive ESP32 is assumed
+for this v1.3 bring-up configuration.
 
 ## Implemented
 
@@ -24,6 +25,9 @@ Distance measurements from all three ToF devices, calibrated IMU samples,
 stereo PDM audio, speaker output, IR emitter control, and UART packets to the
 drive ESP32 are not implemented. `/diagnostics` returns `null` for distance
 and IMU samples so callers cannot mistake I²C presence for valid data.
+On the first bench test, the camera streamed successfully over Wi-Fi, while
+the I²C scan returned no devices and `expanderReady` was false. Sensor power,
+wiring, and bus operation therefore still need hardware investigation.
 
 The camera server has one streaming connection at a time, as in the existing
 video template. Port 82 uses a separate task/server so diagnostics and LED

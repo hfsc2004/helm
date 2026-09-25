@@ -434,6 +434,13 @@ ToF, IMU, microphones, speaker, and IR emitters are **not yet functional** in
 this first image. See the [template notes](firmware/templates/sensor-board-v1-3-esp32s3/README.md)
 before treating it as a working sensor or collision-avoidance system.
 
+The v1.3 bring-up board is a **single-board camera/sensor vehicle**, not a
+sidecar requiring a second drive ESP32. Helm does not show motor controls or
+poll `/telemetry` for this revision until drive firmware exists. If `.local`
+resolution is unreliable on your network, set the vehicle camera URL in the
+Vehicles tab to the board's current IP and port 81; a DHCP lease change may
+require updating that URL again.
+
 ### From the CLI
 
 The same flow is driveable headless — useful for scripting and for the CI/agent path:
@@ -498,7 +505,7 @@ Both are vision-capable (the agent will eventually be able to see the camera fee
 | ESP32 skid-steer ground robot (HTTP/WiFi) | Driving end-to-end |
 | Drive board with **4× Sharp IR distance sensors + collision guard** (front L/C/R + rear) | In production firmware |
 | ESP32-S3 camera sidecar (PSF-original streamer; 3 pin profiles) | Flash-ready, live MJPEG into Drive view |
-| PSF Sensor Board v1.3 (ESP32-S3-CAM) | Bench bring-up firmware compiles; camera, I²C discovery, and RGBW test implemented; hardware validation pending |
+| PSF Sensor Board v1.3 (ESP32-S3-CAM) | Single-board camera bring-up tested over Wi-Fi; ToF/IMU/audio still unimplemented, I²C devices not yet detected on the bench |
 | Dual-board truck (drive ESP32 + ESP32-S3 video, separate IPs, mDNS) | Driving end-to-end |
 | Roving microphone sidecar | Vehicle streams I2S mic to host, host-side playback |
 | ESP32-S3 + Pico 2 quadcopter (with SNN/STDP flight control) | Planned |

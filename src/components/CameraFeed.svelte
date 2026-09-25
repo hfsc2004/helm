@@ -115,6 +115,7 @@
       });
       if (!res.ok || !res.base64) {
         registerError();
+        if (res.error?.includes("reconnect required")) consecutiveErrors = STALE_THRESHOLD;
         return;
       }
       // Skip if this is the same frame we already showed.

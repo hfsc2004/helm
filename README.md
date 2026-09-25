@@ -396,6 +396,11 @@ The `source` field tells you where the frame came from:
 | `cache`   | Pulled from the live MJPEG stream the UI is holding open. Fastest; same frame the UI sees. |
 | `direct`  | The UI wasn't running, so the CLI hit the camera's `/capture` directly. |
 
+When the UI has a live camera stream, snapshots use that cached connection;
+they do not make a second request to the camera board. If the stream stalls,
+Helm closes it and reconnects before resuming snapshots. This matters for
+ESP32 camera servers that can handle only one camera client at a time.
+
 The whole pipeline is local: the camera lives on your LAN, the cache lives in your Helm-UI process, the bridge between processes is loopback-only (`127.0.0.1`, bearer-token auth, descriptor in `<dataDir>/control-plane.json` mode `0600`). Nothing transits the cloud — including the bytes a frontier model sees when it asks for a snapshot.
 
 ## Vehicles tab

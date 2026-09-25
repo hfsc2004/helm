@@ -16,6 +16,7 @@ import type {
   BoardRole,
   DriveFlashConfig,
   DriveTuning,
+  SensorBoardRevision,
   SkidSteerAction,
   Vehicle,
   VideoFlashConfig,
@@ -269,6 +270,11 @@ export interface VehicleSetAudioRequest {
   audio: { baseUrl: string; streamPath?: string } | null;
 }
 
+export interface VehicleSetSensorBoardRequest {
+  vehicleId: string;
+  revision: SensorBoardRevision | null;
+}
+
 export interface VehicleSetDriveRequest {
   vehicleId: string;
   drive: Partial<DriveTuning> | null;
@@ -302,6 +308,7 @@ export interface HelmAPI {
     remove(req: VehicleRemoveRequest): Promise<VehicleMutationResponse>;
     setCamera(req: VehicleSetCameraRequest): Promise<VehicleMutationResponse>;
     setAudio(req: VehicleSetAudioRequest): Promise<VehicleMutationResponse>;
+    setSensorBoard(req: VehicleSetSensorBoardRequest): Promise<VehicleMutationResponse>;
     setDrive(req: VehicleSetDriveRequest): Promise<VehicleMutationResponse>;
     setWifi(req: VehicleSetWifiRequest): Promise<VehicleMutationResponse>;
     setFlashConfig(req: VehicleSetFlashConfigRequest): Promise<VehicleMutationResponse>;
@@ -360,6 +367,7 @@ export const IPC = {
     remove: "vehicle:remove",
     setCamera: "vehicle:set-camera",
     setAudio: "vehicle:set-audio",
+    setSensorBoard: "vehicle:set-sensor-board",
     setDrive: "vehicle:set-drive",
     setWifi: "vehicle:set-wifi",
     setFlashConfig: "vehicle:set-flash-config",

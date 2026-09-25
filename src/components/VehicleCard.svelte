@@ -3,7 +3,7 @@
 <script lang="ts">
   import { fleet } from "../stores/vehicles";
   import { activeView } from "../stores/view";
-  import type { DriveMapTarget, Vehicle } from "@shared/vehicle-contract";
+  import type { DriveMapTarget, SensorBoardRevision, Vehicle } from "@shared/vehicle-contract";
   import { DRIVE_TUNING_DEFAULTS } from "@shared/vehicle-contract";
 
   export let vehicle: Vehicle;
@@ -12,6 +12,7 @@
   let editingCamera = false;
   let audioDraft = vehicle.audio?.baseUrl ?? "";
   let editingAudio = false;
+  let sensorBoardDraft: SensorBoardRevision | "" = vehicle.sensorBoardRevision ?? "";
   let busy = false;
   let error: string | null = null;
 
@@ -19,6 +20,7 @@
   $: cameraDraft = vehicle.camera?.baseUrl ?? "";
   $: hasAudio = !!vehicle.audio;
   $: audioDraft = vehicle.audio?.baseUrl ?? "";
+  $: sensorBoardDraft = vehicle.sensorBoardRevision ?? "";
 
   // ---------------- Drive tuning ----------------
   // Edited locally; flushed to the registry via fleet.setDrive on Save.
@@ -146,6 +148,14 @@
       return;
     }
     editingAudio = false;
+  }
+
+  async function saveSensorBoard() {
+    busy = true;
+    error = null;
+    const res = await fleet.setSensorBoard(vehicle.id, sensorBoardDraft || null);
+    busy = false;
+    if (!res.ok) error = res.error ?? "Failed to save sensor board revision.";
   }
 
   async function removeVehicle() {
@@ -284,6 +294,22 @@
           </button>
         </div>
       {/if}
+    </div>
+  </section>
+
+  <section class="sidecars">
+    <h4>Sensor board</h4>
+    <div class="sidecar-line">
+      <select bind:value={sensorBoardDraft} disabled={busy} aria-label="PSF Sensor Board revision">
+        <option value="">Not selected</option>
+        <option value="1.1">GSN Robotics - PSF Sensor Board v1.1</option>
+        <option value="1.3">GSN Robotics - PSF Sensor Board v1.3</option>
+      </select>
+      <button
+        class="primary-sm"
+        on:click={saveSensorBoard}
+        disabled={busy || sensorBoardDraft === (vehicle.sensorBoardRevision ?? "")}
+      >Save</button>
     </div>
   </section>
 
@@ -464,6 +490,17 @@
     align-items: center;
     gap: 0.55rem;
     font-size: 0.85rem;
+  }
+  .sidecar-line select {
+    min-width: 0;
+    max-width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    padding: 0.35rem 0.5rem;
+    border-radius: 4px;
+    font: inherit;
+    font-size: 0.8rem;
   }
   .sidecar-name {
     min-width: 60px;

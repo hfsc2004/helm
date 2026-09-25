@@ -45,6 +45,9 @@ export type LossOfCommsBehavior = "stop" | "hover" | "rth" | "land";
 /** Which of a vehicle's two boards a given config block applies to. */
 export type BoardRole = "drive" | "video";
 
+/** Installed GSN Robotics / PSF Sensor Board hardware revision. */
+export type SensorBoardRevision = "1.1" | "1.3";
+
 export interface StaticIpConfig {
   ip: string;
   cidr: number;
@@ -126,6 +129,8 @@ export type DriveMapTarget =
 export interface Vehicle {
   id: string;
   name: string;
+  /** Optional hardware profile; absent for vehicles without a selected sensor board. */
+  sensorBoardRevision?: SensorBoardRevision;
   kind: VehicleKind;
   capabilities: VehicleCapability[];
   /** Drive board runtime endpoint. */

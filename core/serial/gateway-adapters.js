@@ -9,7 +9,7 @@
  * Current implementation focuses on USB/serial discovery and source resolution.
  *
  * @module moe-gateway-adapters
- * @version 1.1.3 - March 5, 2026
+ * @version 1.1.4 - September 25, 2026
  * ============================================================================
  */
 
@@ -180,7 +180,7 @@ function inferSerialKind(devicePath, label = '') {
 
 function inferBoardHint(devicePath, label = '') {
   const sample = `${devicePath} ${label}`.toLowerCase();
-  if (/esp32|cp210|ch340|ch910|wchusbserial|silicon[\s_-]*labs/.test(sample)) return 'esp32';
+  if (/esp32|espressif|cp210|ch340|ch910|wchusbserial|silicon[\s_-]*labs/.test(sample)) return 'esp32';
   if (/pico|rp2040|raspberry[\s_-]*pi/.test(sample)) return 'raspberry-pi-pico';
   return '';
 }

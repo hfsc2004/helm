@@ -24,19 +24,21 @@
 
   const BOARD_OPTIONS: Array<{ value: BoardKind; label: string }> = [
     { value: "esp32", label: "ESP32 (drive board)" },
-    { value: "esp32-s3", label: "ESP32-S3 (video / camera board)" },
+    { value: "esp32-s3", label: "ESP32-S3 (camera / sensor board)" },
     { value: "raspberry-pi-pico", label: "Raspberry Pi Pico (RP2040, no WiFi)" },
     { value: "raspberry-pi-pico-w", label: "Raspberry Pi Pico W (RP2040 + WiFi)" },
     { value: "raspberry-pi-pico-2w", label: "Raspberry Pi Pico 2 W (RP2350 + WiFi)" },
   ];
 
-  function hintToBoard(hint: string): BoardKind {
-    if (hint === "esp32") return "esp32";
+  function hintToBoard(hint: string): BoardKind | "" {
+    // A generic ESP32 USB descriptor cannot distinguish an ESP32 from an
+    // ESP32-S3. Require an explicit choice before compiling or flashing.
+    if (hint === "esp32-s3") return "esp32-s3";
     if (hint === "raspberry-pi-pico") return "raspberry-pi-pico";
-    return "esp32";
+    return "";
   }
 
-  let board: BoardKind = hintToBoard(port.boardHint);
+  let board: BoardKind | "" = hintToBoard(port.boardHint);
 
   // Templates fetched on mount; filtered by selected board.
   let allTemplates: FlashTemplateSummary[] = [];
@@ -51,7 +53,7 @@
   // to find it.
   $: selectedTemplate = allTemplates.find((t) => t.id === selectedTemplateId) ?? null;
 
-  function templateMatchesBoard(t: FlashTemplateSummary, b: BoardKind): boolean {
+  function templateMatchesBoard(t: FlashTemplateSummary, b: BoardKind | ""): boolean {
     if (b === "esp32") {
       // Drive-side templates (FQBN esp32:esp32:esp32) — not the S3 ones.
       return t.target === "esp32" && !t.fqbn.includes("esp32s3");
@@ -65,7 +67,8 @@
     return false;
   }
 
-  $: isVideoTemplate = selectedTemplate?.id === "video-esp32-s3";
+  $: isSensorBoardV13 = selectedTemplate?.id === "sensor-board-v1-3-esp32s3";
+  $: isVideoTemplate = selectedTemplate?.id === "video-esp32-s3" || isSensorBoardV13;
   $: boardRole = isVideoTemplate ? ("video" as const) : ("drive" as const);
 
   // Keep selectedTemplateId in sync with whatever filteredTemplates currently
@@ -100,7 +103,8 @@
   // when the user hasn't typed a name yet; we fall back to "psf-robot" at
   // flash time so the firmware always has something to advertise.
   $: mdnsName = vehicleSlug || "psf-robot";
-  $: mdnsHost = `${mdnsName}.local`;
+  $: boardMdnsName = isSensorBoardV13 ? `${mdnsName}-sensor` : mdnsName;
+  $: mdnsHost = `${boardMdnsName}.local`;
 
   let wifiSsid = "";
   let wifiPassword = "";
@@ -279,18 +283,20 @@
 
   function buildVars(): Record<string, unknown> {
     if (isVideoTemplate) {
-      return {
+      const values: Record<string, unknown> = {
         "wifi.ssid": wifiSsid,
         "wifi.password": wifiPassword,
         "wifi.useStatic": ipMode === "static",
         "wifi.staticIp": staticIp,
         "wifi.staticCidr": staticCidr,
-        "mdns.name": mdnsName,
+        "mdns.name": boardMdnsName,
         "http.port": videoHttpPort,
         "camera.pinProfile": videoPinProfile,
         "camera.frameSize": videoFrameSize,
         "camera.jpegQuality": videoJpegQuality,
       };
+      const keys = new Set(selectedTemplate?.vars.map((v) => v.key) ?? []);
+      return Object.fromEntries(Object.entries(values).filter(([key]) => keys.has(key)));
     }
     return {
       "wifi.ssid": wifiSsid,
@@ -324,8 +330,9 @@
   // Resolves the selected template inline (rather than relying on the $:
   // derived `selectedTemplate`) so the gate is consistent with what the
   // dropdown is currently bound to, regardless of Svelte reactive ordering.
-  function flashBlockReason(): string {
+  function flashBlockReason(..._dependencies: unknown[]): string {
     if (flashing) return "flash in progress";
+    if (!board) return "select the exact board type";
     if (!selectedTemplateId) return "pick a template";
     const tpl = allTemplates.find((t) => t.id === selectedTemplateId);
     if (!tpl) {
@@ -333,7 +340,7 @@
         ? "loading templates…"
         : "pick a template";
     }
-    const tplIsVideo = tpl.id === "video-esp32-s3";
+    const tplIsVideo = tpl.id === "video-esp32-s3" || tpl.id === "sensor-board-v1-3-esp32s3";
     if (!vehicleName.trim()) {
       if (!tplIsVideo) return "enter a vehicle name";
       if (!attachToVehicleId) return "enter a vehicle name (or attach to an existing one)";
@@ -358,8 +365,9 @@
   // re-runs flashBlockReason() when any of them change. Without this list,
   // Svelte can fail to invalidate `blockReason` when the user updates a
   // field inside the dialog — leaving the user staring at a stale gate.
-  $: blockReason = (
+  $: blockReason = flashBlockReason(
     flashing,
+    board,
     selectedTemplateId,
     allTemplates,
     vehicleName,
@@ -369,8 +377,7 @@
     ipMode,
     staticIp,
     staticCidr,
-    attachToVehicleId,
-    flashBlockReason()
+    attachToVehicleId
   );
 
   function canFlash(): boolean {
@@ -394,7 +401,7 @@
       board: boardRole,
     };
     if (isVideoTemplate) {
-      req.buildProperties = pinProfileBuildProps();
+      if (!isSensorBoardV13) req.buildProperties = pinProfileBuildProps();
       req.eraseBeforeUpload = videoEraseBeforeUpload;
       req.captureRuntimeSerialMs = videoCaptureSerialMs > 0 ? videoCaptureSerialMs : undefined;
     }
@@ -488,14 +495,21 @@
           return;
         }
         const camRes = await fleet.setCamera(targetId, {
-          baseUrl: `http://${resolvedHost}:${videoHttpPort}`,
-          streamPath: videoStreamPath,
-          snapshotPath: videoSnapshotPath,
-          flashStatusPath: videoFlashStatusPath,
+          baseUrl: `http://${resolvedHost}:${isSensorBoardV13 ? 81 : videoHttpPort}`,
+          streamPath: isSensorBoardV13 ? "/stream" : videoStreamPath,
+          snapshotPath: isSensorBoardV13 ? "/capture" : videoSnapshotPath,
+          flashStatusPath: isSensorBoardV13 ? "/health" : videoFlashStatusPath,
         });
         if (!camRes.ok) {
           registryAddError = camRes.error ?? "camera attach failed";
           return;
+        }
+        if (isSensorBoardV13) {
+          const boardRes = await fleet.setSensorBoard(targetId, "1.3");
+          if (!boardRes.ok) {
+            registryAddError = boardRes.error ?? "sensor board revision save failed";
+            return;
+          }
         }
         registryReused = reused;
         registryAddOk = true;
@@ -553,12 +567,15 @@
       <label>
         <span class="lbl">Board type</span>
         <select bind:value={board} disabled={flashing}>
+          <option value="" disabled>— select board type —</option>
           {#each BOARD_OPTIONS as o (o.value)}
             <option value={o.value}>{o.label}</option>
           {/each}
         </select>
       </label>
-      {#if port.boardHint}
+      {#if port.boardHint === "esp32"}
+        <p class="muted small">USB reports an ESP32-family device but cannot distinguish ESP32 from ESP32-S3. Select the exact board type above.</p>
+      {:else if port.boardHint}
         <p class="muted small">Auto-detected from USB descriptors as <strong>{port.boardHint}</strong>. Override here if needed.</p>
       {/if}
     </section>
@@ -569,6 +586,8 @@
         <p class="muted">Loading templates…</p>
       {:else if templatesError}
         <p class="error">{templatesError}</p>
+      {:else if !board}
+        <p class="muted">Select the board type to see matching firmware.</p>
       {:else if filteredTemplates.length === 0}
         <p class="muted">
           No templates target this board yet.
@@ -811,14 +830,16 @@
     {#if isVideoTemplate}
       <section>
         <h3>Camera</h3>
-        <label>
-          <span class="lbl">Pin profile</span>
-          <select bind:value={videoPinProfile} disabled={flashing}>
-            <option value="esp32s3_eye">ESP32-S3-EYE (Espressif dev board)</option>
-            <option value="ai_thinker_s3">AI-Thinker ESP32-S3-CAM</option>
-            <option value="elegoo_s3">Elegoo ESP32-S3-WROOM-1 shield</option>
-          </select>
-        </label>
+        {#if !isSensorBoardV13}
+          <label>
+            <span class="lbl">Pin profile</span>
+            <select bind:value={videoPinProfile} disabled={flashing}>
+              <option value="esp32s3_eye">ESP32-S3-EYE (Espressif dev board)</option>
+              <option value="ai_thinker_s3">AI-Thinker ESP32-S3-CAM</option>
+              <option value="elegoo_s3">Elegoo ESP32-S3-WROOM-1 shield</option>
+            </select>
+          </label>
+        {/if}
         <label>
           <span class="lbl">Default frame size</span>
           <select bind:value={videoFrameSize} disabled={flashing}>
@@ -833,10 +854,12 @@
           <span class="lbl">JPEG quality (0..63, lower=better)</span>
           <input type="number" min="0" max="63" bind:value={videoJpegQuality} disabled={flashing} />
         </label>
-        <label>
-          <span class="lbl">HTTP port</span>
-          <input type="number" min="1" max="65535" bind:value={videoHttpPort} disabled={flashing} />
-        </label>
+        {#if !isSensorBoardV13}
+          <label>
+            <span class="lbl">HTTP port</span>
+            <input type="number" min="1" max="65535" bind:value={videoHttpPort} disabled={flashing} />
+          </label>
+        {/if}
         <label class="checkbox">
           <input type="checkbox" bind:checked={videoEraseBeforeUpload} disabled={flashing} />
           Erase flash before upload

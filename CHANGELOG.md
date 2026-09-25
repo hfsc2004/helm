@@ -5,6 +5,15 @@ All notable changes to PSF Helm will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-09-25
+
+### Fixed
+- Serve CLI snapshots from the shared camera cache without also opening a
+  redundant `/capture` request to the board.
+- Reconnect a stalled UI camera stream without overlapping it with direct
+  capture requests. On the PSF Sensor Board v1.3 hardware, Helm again held
+  one camera connection and ping showed no packet loss during the live test.
+
 ## [0.3.1] - 2026-09-25
 
 ### Fixed

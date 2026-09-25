@@ -151,7 +151,7 @@ export function registerIpcHandlers(opts: { version: string }): void {
   // firmware can only serve one HTTP client at a time, so this is the
   // only safe pattern.
 
-  const cameraConsumers = new Map<string, { release: () => Promise<void> }>();
+  const cameraConsumers = new Map<string, { vehicleId: string; release: () => Promise<void> }>();
 
   function consumerId(): string {
     return `cam_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -165,7 +165,7 @@ export function registerIpcHandlers(opts: { version: string }): void {
       const handle = cameraStream.acquire(vehicle);
       if (!handle) throw new Error(`vehicle ${req.vehicleId} has no camera configured`);
       const id = consumerId();
-      cameraConsumers.set(id, { release: () => handle.release() });
+      cameraConsumers.set(id, { vehicleId: vehicle.id, release: () => handle.release() });
 
       // Auto-release if the renderer window closes without telling us.
       const win = BrowserWindow.fromWebContents(event.sender);
@@ -201,7 +201,10 @@ export function registerIpcHandlers(opts: { version: string }): void {
       const timeoutMs = Math.max(100, req.timeoutMs ?? 8000);
 
       // Preferred path: the renderer already has a stream open. Reuse it.
-      if (cameraStream.isStalled(vehicle.id)) cameraStream.invalidate(vehicle.id);
+      if (cameraStream.isStalled(vehicle.id)) {
+        cameraStream.invalidate(vehicle.id);
+        return { ok: false, error: "camera stream stalled; reconnect required" };
+      }
       const existing = cameraStream.peek(vehicle.id);
       if (existing) {
         const handle = cameraStream.acquire(vehicle);
@@ -219,12 +222,19 @@ export function registerIpcHandlers(opts: { version: string }): void {
             source: "cache",
           };
         } catch {
-          // A dead MJPEG connection must not strand the UI. Close it and
-          // try the board's one-shot capture endpoint below.
+          // The renderer owns a long-lived stream handle. Let it reconnect
+          // rather than opening /capture while the old stream is unwinding.
           cameraStream.invalidate(vehicle.id);
+          return { ok: false, error: "camera stream failed; reconnect required" };
         } finally {
           await handle.release();
         }
+      }
+
+      // An upstream stream can end before the renderer releases its handle.
+      // A direct capture here would compete with its pending reconnect.
+      if ([...cameraConsumers.values()].some((consumer) => consumer.vehicleId === vehicle.id)) {
+        return { ok: false, error: "camera stream ended; reconnect required" };
       }
 
       // Fallback: nothing's holding the stream right now (no Drive view

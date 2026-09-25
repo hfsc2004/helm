@@ -124,6 +124,7 @@ async function handleSnapshot(
         "x-helm-vehicle-name": vehicle.name,
       });
       res.end(Buffer.from(frame.bytes));
+      return;
     } catch {
       // The stream can fail after the renderer acquires it. Drop the stale
       // connection and try /capture rather than returning its old failure.

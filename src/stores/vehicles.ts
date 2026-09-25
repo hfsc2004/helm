@@ -6,6 +6,7 @@ import type {
   BoardRole,
   DriveFlashConfig,
   DriveTuning,
+  SensorBoardRevision,
   Vehicle,
   VideoFlashConfig,
   WifiBoardConfig,
@@ -45,6 +46,10 @@ function createFleetStore(): Writable<FleetState> & {
   setAudio: (
     id: string,
     audio: { baseUrl: string; streamPath?: string } | null
+  ) => Promise<{ ok: boolean; vehicle?: Vehicle; error?: string }>;
+  setSensorBoard: (
+    id: string,
+    revision: SensorBoardRevision | null
   ) => Promise<{ ok: boolean; vehicle?: Vehicle; error?: string }>;
   setDrive: (
     id: string,
@@ -130,6 +135,18 @@ function createFleetStore(): Writable<FleetState> & {
     },
     async setAudio(id, audio) {
       const res = await helm().vehicle.setAudio({ vehicleId: id, audio });
+      if (res.ok && res.vehicle) {
+        const vehicle = res.vehicle;
+        store.update((s) => ({
+          ...s,
+          vehicles: s.vehicles.map((v) => (v.id === id ? vehicle : v)),
+        }));
+        return { ok: true, vehicle };
+      }
+      return { ok: false, error: res.error };
+    },
+    async setSensorBoard(id, revision) {
+      const res = await helm().vehicle.setSensorBoard({ vehicleId: id, revision });
       if (res.ok && res.vehicle) {
         const vehicle = res.vehicle;
         store.update((s) => ({

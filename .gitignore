@@ -73,3 +73,6 @@ docs/mockups/
 # Firmware dumps (local-only — large binaries; use Git LFS if we ever need to ship one)
 firmware/**/backup-*/
 *.bin
+
+# Local PSF Sensor Board hardware references (not part of the repository)
+Sensor_Board_v1.3/

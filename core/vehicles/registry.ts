@@ -7,6 +7,7 @@ import type {
   BoardRole,
   DriveFlashConfig,
   DriveTuning,
+  SensorBoardRevision,
   Vehicle,
   VideoFlashConfig,
   WifiBoardConfig,
@@ -168,6 +169,19 @@ export function setAudio(id: string, input: SetAudioInput | null): Vehicle | nul
     if (!vehicle.capabilities.includes("audio.pcm")) {
       vehicle.capabilities = [...vehicle.capabilities, "audio.pcm"];
     }
+  });
+}
+
+export function setSensorBoardRevision(
+  id: string,
+  revision: SensorBoardRevision | null
+): Vehicle | null {
+  if (revision !== null && revision !== "1.1" && revision !== "1.3") {
+    throw new Error("Sensor board revision must be 1.1 or 1.3.");
+  }
+  return mutate(id, (vehicle) => {
+    if (revision === null) delete vehicle.sensorBoardRevision;
+    else vehicle.sensorBoardRevision = revision;
   });
 }
 

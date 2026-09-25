@@ -5,6 +5,22 @@ All notable changes to PSF Helm will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-09-25
+
+### Added
+- GSN Robotics / PSF Sensor Board v1.3 ESP32-S3-CAM bring-up template with
+  camera streaming, I²C presence diagnostics, and RGBW LED test control.
+  ToF ranging, IMU samples, audio, and drive-board collision rules remain
+  follow-up work; the new image is not yet validated on hardware.
+- Per-vehicle PSF Sensor Board revision setting (v1.1, v1.3, or none) in the
+  Vehicles UI and `vehicle-sensor-board-set` CLI command. Flashing the v1.3
+  template attaches its camera and records v1.3 for that vehicle.
+
+### Fixed
+- A generic ESP32 USB descriptor no longer silently selects the classic
+  ESP32 target. The Configure Board wizard requires an explicit ESP32 versus
+  ESP32-S3 choice before compiling or flashing.
+
 ## [Unreleased]
 
 Foundation work in progress on a single day. Linux x64 is the only platform

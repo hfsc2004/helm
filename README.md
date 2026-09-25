@@ -285,6 +285,7 @@ firmware/           ESP32 / microcontroller sketches
     ground-skidsteer-esp32/  drive ESP32 + L298N
     video-esp32-s3/          ESP32-S3 camera streamer (3 pin profiles:
                              esp32s3_eye / ai_thinker_s3 / elegoo_s3)
+    sensor-board-v1-3-esp32s3/  PSF Sensor Board v1.3 bench bring-up
   raw-from-core-ce/ unconverted PSF Core sketches awaiting templatization
 install/            one-time dependency installers
 public/             static assets (logo, etc.)
@@ -416,8 +417,8 @@ Helm flashes microcontrollers from the same Devices tab you use to inspect them.
 
 ### From the UI
 
-1. **Plug the board in.** Linux usually exposes it as `/dev/ttyUSB0` (CP210x / CH340 bridges) or `/dev/ttyACM0` (native USB-CDC, including ESP32-S3 and Pico 2). Helm tags it with a board hint chip (green = ESP32, purple = Pi Pico).
-2. **Click Configure →.** Pick the template (auto-selected when only one matches the board kind).
+1. **Plug the board in.** Linux usually exposes it as `/dev/ttyUSB0` (CP210x / CH340 bridges) or `/dev/ttyACM0` (native USB-CDC, including ESP32-S3 and Pico 2). Helm tags it with a board-family hint where available; a generic ESP32 hint does **not** distinguish a classic ESP32 from an ESP32-S3.
+2. **Click Configure →.** Select the exact board type, then its firmware template. For the PSF Sensor Board v1.3's ESP32-S3-CAM, choose **ESP32-S3 (camera / sensor board)** and **GSN Robotics - PSF Sensor Board v1.3 (bring-up)**. Helm requires the explicit chip choice when USB identifies only the ESP32 family.
 3. **Vehicle name.** Becomes the mDNS hostname automatically — naming the truck `Truck` makes it reachable as `truck.local` after flash.
 4. **Wi-Fi.** SSID dropdown shows what the host's radio can see, filtered to the bands the board can actually join. Eye-icon toggle on the password field so you can verify it before flashing it in. Networks on bands the target can't reach (e.g. 5GHz for a classic ESP32) are hidden with a "N networks hidden" note.
 5. **Networking.** Static IP (default) or DHCP. With DHCP, Helm stores the vehicle's `transport.host` as `<name>.local` instead of an IP, so a new DHCP lease doesn't break the connection. Heads-up: mDNS needs Avahi (Linux) or Bonjour (Windows); on a guest Wi-Fi that blocks multicast, switch to Static IP.
@@ -425,6 +426,13 @@ Helm flashes microcontrollers from the same Devices tab you use to inspect them.
 7. **Click Flash.** First time on a host, arduino-cli auto-installs the ESP32 core (~5–10 min, one time). Compile + upload streams live below. On success, Helm updates the registry — re-flashing the same robot updates the existing record instead of erroring "vehicle already exists".
 
 If the button is greyed out, a yellow `!` chip next to it names the missing field — no guessing which gate is closed.
+
+The v1.3 bring-up image uses `esp32:esp32:esp32s3:PSRAM=opi`; a compile line
+showing `esp32:esp32:esp32` means the classic ESP32 template was selected.
+Its camera runs on port 81 and bench diagnostics/LED tests on port 82. The
+ToF, IMU, microphones, speaker, and IR emitters are **not yet functional** in
+this first image. See the [template notes](firmware/templates/sensor-board-v1-3-esp32s3/README.md)
+before treating it as a working sensor or collision-avoidance system.
 
 ### From the CLI
 
@@ -466,6 +474,7 @@ Once the board reboots and joins Wi-Fi, the firmware exposes:
 ### Troubleshooting
 
 - **"vehicle already exists"** — fixed; re-flashing the same name now reuses the existing registry record. If you see this on an older build, delete the record from the Vehicles tab and re-flash.
+- **"This chip is ESP32-S3, not ESP32"** — the wrong board type/template was selected. Choose ESP32-S3 and the matching v1.3 template; the serial port may be correct even when the compile target is not.
 - **mDNS works once then times out** — known; the responder isn't re-announcing periodically yet. Fall back to the board's IP (from `/health`) until that's fixed.
 - **Read from `/dev/ttyUSB0` stalls** — close Helm-UI (it competes with the bootloader for the serial port via background telemetry polls) and retry.
 - **First flash takes 10+ minutes** — that's the one-time ESP32 core install. Subsequent flashes are ~30s.
@@ -489,6 +498,7 @@ Both are vision-capable (the agent will eventually be able to see the camera fee
 | ESP32 skid-steer ground robot (HTTP/WiFi) | Driving end-to-end |
 | Drive board with **4× Sharp IR distance sensors + collision guard** (front L/C/R + rear) | In production firmware |
 | ESP32-S3 camera sidecar (PSF-original streamer; 3 pin profiles) | Flash-ready, live MJPEG into Drive view |
+| PSF Sensor Board v1.3 (ESP32-S3-CAM) | Bench bring-up firmware compiles; camera, I²C discovery, and RGBW test implemented; hardware validation pending |
 | Dual-board truck (drive ESP32 + ESP32-S3 video, separate IPs, mDNS) | Driving end-to-end |
 | Roving microphone sidecar | Vehicle streams I2S mic to host, host-side playback |
 | ESP32-S3 + Pico 2 quadcopter (with SNN/STDP flight control) | Planned |
@@ -519,6 +529,7 @@ Working end-to-end on Linux x64:
 - ✅ Drive an ESP32 skid-steer truck over WiFi (CLI and UI)
 - ✅ **Dual-board vehicles**: separate drive ESP32 + ESP32-S3 camera-and-video board, each with its own IP, Wi-Fi credentials, static-IP block, and flash params — mirrors the PSF Core Relay "Gateway Card" shape
 - ✅ **Configure-and-flash from the UI**: click a detected board → pick a template → fill in Wi-Fi / camera params → flash with live arduino-cli output
+- ✅ **PSF Sensor Board revision setting** per vehicle (v1.1 or v1.3) and v1.3 ESP32-S3-CAM bench bring-up template; ranging, audio, and IMU data still await firmware and hardware validation
 - ✅ **mDNS discovery** — drive boards advertise as `<name>.local` so DHCP IP changes don't break the connection; the host-side HTTP layer translates `ENOTFOUND` on `.local` names into "install Avahi (Linux) or Bonjour (Windows)" instead of a raw DNS error
 - ✅ **Host-side Wi-Fi scan** in the flash wizard — SSID dropdown lists networks the host sees (Linux/`nmcli` today, macOS/Windows fall back to text input), filtered to the bands the target board's radio can actually join (no 5GHz networks offered for an ESP32)
 - ✅ **Flash wizard polish** — yellow `!` chip names the missing field instead of silently disabling the Flash button; password reveal eye-icon so the user can verify a Wi-Fi typo *before* it gets baked into firmware; re-flashing the same robot updates the existing registry entry instead of erroring with "vehicle already exists"

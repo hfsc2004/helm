@@ -189,7 +189,7 @@
         <ul class="ports">
           {#each ports as p (p.path)}
             <li>
-              {#if p.boardHint}
+              {#if p.boardHint || p.kind === "usb"}
                 <button
                   class="port-button"
                   type="button"
@@ -197,7 +197,9 @@
                 >
                   <div class="port-main">
                     <span class="path">{p.path}</span>
-                    <span class="hint hint-{p.boardHint}">{boardLabel(p.boardHint)}</span>
+                    {#if p.boardHint}
+                      <span class="hint hint-{p.boardHint}">{boardLabel(p.boardHint)}</span>
+                    {/if}
                     <span class="cta">Configure →</span>
                   </div>
                   <div class="port-meta">{p.label}</div>

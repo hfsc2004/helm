@@ -18,6 +18,7 @@ import type {
   VehicleCameraSnapshotResponse,
   VehicleCameraStreamOpenRequest,
   VehicleSetAudioRequest,
+  VehicleSetSensorBoardRequest,
   VehicleSetCameraRequest,
   VehicleSetDriveRequest,
   VehicleSetFlashConfigRequest,
@@ -102,6 +103,17 @@ export function registerIpcHandlers(opts: { version: string }): void {
     return updated
       ? { ok: true, vehicle: updated }
       : { ok: false, error: `no vehicle ${req.vehicleId}` };
+  });
+
+  ipcMain.handle(IPC.vehicle.setSensorBoard, async (_e, req: VehicleSetSensorBoardRequest) => {
+    try {
+      const updated = registry.setSensorBoardRevision(req.vehicleId, req.revision);
+      return updated
+        ? { ok: true, vehicle: updated }
+        : { ok: false, error: `no vehicle ${req.vehicleId}` };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
   });
 
   ipcMain.handle(IPC.vehicle.setDrive, async (_e, req: VehicleSetDriveRequest) => {

@@ -22,6 +22,7 @@ import "./commands/vehicle.js";
 import "./commands/vehicle-camera.js";
 import "./commands/vehicle-snapshot.js";
 import "./commands/vehicle-audio.js";
+import "./commands/vehicle-sensor-board.js";
 import "./commands/vehicle-drive.js";
 import "./commands/vehicle-wifi.js";
 import "./commands/vehicle-flash-config.js";

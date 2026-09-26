@@ -5,6 +5,27 @@ All notable changes to PSF Helm will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.6] - 2026-09-26
+
+### Fixed
+- Preserve negative PCM samples when scaling the embedded Sensor Board v1.3
+  startup chime; unsigned fade arithmetic had made boot playback sound heavily
+  distorted even though Helm-streamed playback was clean. A compile-time
+  assertion guards the signed calculation.
+
+### Changed
+- Set the boot chime to the hardware-tested 30% level and add a synchronized
+  RGBW startup sequence: a one-second lower-right, upper-left, upper-right
+  chase, then all LEDs lighting as the chime starts, shifting to white and back
+  to dim blue during its decay, and switching off at the end.
+- Add `/speaker-chime` and `/startup-sequence` diagnostic endpoints for
+  replaying the embedded audio or full sequence without a power cycle.
+
+### Known issues
+- The I²C expander occasionally fails initialization on the first reset after
+  flashing, which can skip the boot sound and sensor initialization. A power
+  cycle restored it in bench testing; root cause remains open.
+
 ## [0.3.5] - 2026-09-26
 
 ### Added

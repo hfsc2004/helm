@@ -89,18 +89,30 @@ for this v1.3 bring-up configuration.
   The current template changes that startup order: it holds P4 low while the
   ToF devices and speaker I²S initialize (with an early best-effort shutdown
   as soon as I²C starts), writes silence to establish the
-  audio clocks, then enables P4 and plays `PSF_Chime.wav` once at boot.
+  audio clocks, then enables P4 and plays `PSF_Chime.wav` once at boot. Just
+  before the chime, the RGBW LEDs chase over one second: lower right, upper
+  left, then upper right (truck-forward perspective), starting dark blue at
+  roughly 2.5% brightness and shifting to a 50/50 blue-white mix at roughly
+  5%. All three light together when the chime starts, transition to white
+  during its opening, then return to dim dark blue during the decay before
+  turning off at the end. `POST /startup-sequence` replays the full LED-and-
+  chime sequence for live tuning without rebooting.
   The bundled `startup_chime.h` is the 1.55-second source converted from
   44.1 kHz stereo to 16 kHz mono PCM; playback duplicates the samples into
-  both I²S slots at 50% gain with short fades. Regenerate the header with
+  both I²S slots at 30% gain with short fades. Regenerate the header with
   `node firmware/templates/sensor-board-v1-3-esp32s3/generate-startup-chime.mjs`.
   Helm stages the header with the sketch on every flash. The boot chime now
   plays before allocating the 32 KiB streaming queue, preserving heap during
   its first I²S writes. If the expander or speaker I²S is unavailable,
-  the chime is skipped. This order is intended to reduce the initialization
-  pop, but its acoustic result still needs a live-board test. `/health` and
+  the chime is skipped. The signed PCM fix and final LED/chime sequence were
+  verified by listening on the live board. An intermittent expander-init
+  failure can still skip the sequence on some resets; power cycling restored
+  the board during bench testing. `/health` and
   `/diagnostics` report `startupChimePlayed` so a missed boot sound can be
   distinguished from an initialization failure.
+  `POST /speaker-chime` replays the same embedded PCM after boot and reports
+  the playback stage, bytes written, and I²S error. Comparing its sound with
+  the automatic boot chime separates audio-data problems from boot timing.
   `POST /speaker-pcm` accepts a multipart form file (field name `file`) of
   16 kHz, signed 16-bit, little-endian, stereo interleaved PCM. It writes
   incoming chunks into a 32 KiB board-side playback queue, prebuffers about

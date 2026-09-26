@@ -28,7 +28,7 @@ writeFileSync(destination, [
   "#include <Arduino.h>",
   "",
   "// PSF_Chime.wav converted to signed 16-bit, 16 kHz, mono PCM.",
-  "// Boot playback applies 50% gain. Keep this asset in flash, not working RAM.",
+  "// Boot playback applies 30% gain. Keep this asset in flash, not working RAM.",
   "static const uint8_t kStartupChimePcm[] PROGMEM = {",
   lines.join(",\n"),
   "};",

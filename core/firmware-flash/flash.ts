@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Pseudo Science Fiction
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 
 import * as bmoc from "../bmoc/index.js";
 import { paths } from "../paths.js";
@@ -319,6 +319,19 @@ export async function flash(
   mkdirSync(sketchDir, { recursive: true });
   const sketchPath = join(sketchDir, `${req.templateId}.ino`);
   writeFileSync(sketchPath, rendered.sketch, "utf8");
+  for (const filename of tmpl.manifest.sketchFiles ?? []) {
+    if (basename(filename) !== filename || filename === "." || filename === "..") {
+      onProgress({ stage: "error", message: `invalid sketch file name: ${filename}` });
+      return { ok: false, reason: `invalid sketch file name: ${filename}` };
+    }
+    try {
+      copyFileSync(join(tmpl.dir, filename), join(sketchDir, filename));
+    } catch (error) {
+      const reason = `could not stage sketch file ${filename}: ${String(error)}`;
+      onProgress({ stage: "error", message: reason });
+      return { ok: false, reason };
+    }
+  }
 
   if (req.dryRun) {
     onProgress({

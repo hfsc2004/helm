@@ -13,11 +13,13 @@
 #include <ESP_I2S.h>
 #include <driver/gpio.h>
 #include <driver/i2s_pdm.h>
+#include <driver/pulse_cnt.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
 #include <VL53L1X.h>
 #include <Adafruit_VL53L5CX.h>
+#include "startup_chime.h"
 
 static const char *WIFI_SSID = "{{wifi.ssid}}";
 static const char *WIFI_PASSWORD = "{{wifi.password}}";
@@ -48,7 +50,9 @@ static constexpr uint16_t SPEAKER_TONE_HZ = 660;
 static constexpr uint16_t SPEAKER_TONE_MS = 350;
 static constexpr int16_t SPEAKER_TONE_AMPLITUDE = 6000;
 static constexpr size_t SPEAKER_CHUNK_BYTES = 1024;
-static constexpr uint8_t SPEAKER_BUFFER_CHUNKS = 8;
+static constexpr uint8_t SPEAKER_BUFFER_CHUNKS = 32;
+static constexpr uint8_t STARTUP_CHIME_GAIN_PERCENT = 50;
+static constexpr uint16_t STARTUP_CHIME_FADE_FRAMES = SPEAKER_SAMPLE_RATE / 50;
 static constexpr uint8_t LED_PIN = 48;
 static constexpr uint8_t LED_COUNT = 3;
 static constexpr uint8_t CAMERA_PORT = 81;
@@ -72,8 +76,14 @@ bool rearTofReady = false;
 bool wideTofReady = false;
 bool imuReady = false;
 bool microphonesReady = false;
+bool micClockHeld = false;
+int micClockHeldLevel = -1;
 bool speakerReady = false;
 bool speakerAmpEnabled = false;
+bool startupChimePlayed = false;
+const char *startupChimeStage = "not-started";
+size_t startupChimeBytesWritten = 0;
+int startupChimeI2sError = 0;
 int imuWhoAmI = -1;
 uint32_t bootMs = 0;
 uint8_t ledValues[LED_COUNT][4] = {};
@@ -93,6 +103,7 @@ volatile bool speakerPcmStreaming = false;
 volatile bool speakerPcmUploadComplete = false;
 volatile bool speakerPcmUploadFailed = false;
 uint8_t speakerPcmPending[4] = {};
+bool playStartupChime();
 uint8_t speakerPcmPendingSize = 0;
 VL53L5CX_ResultsData wideResults = {};
 bool wideHasFrame = false;
@@ -118,6 +129,16 @@ bool readRegister8(uint8_t address, uint8_t reg, uint8_t *value) {
   if (Wire.requestFrom(address, static_cast<uint8_t>(1)) != 1) return false;
   *value = Wire.read();
   return true;
+}
+
+void muteSpeakerAmpEarly() {
+  // Best effort immediately after I2C starts; initExpander retries later if
+  // the sensor-board rail has not risen yet. Preserve the other P0-P7 states.
+  uint8_t output = 0, direction = 0;
+  if (!readRegister8(TCA9534_ADDRESS, 0x01, &output) ||
+      !readRegister8(TCA9534_ADDRESS, 0x03, &direction)) return;
+  writeExpander(0x01, output & ~SPEAKER_ENABLE_MASK);
+  writeExpander(0x03, direction & ~SPEAKER_ENABLE_MASK);
 }
 
 bool writeRegister8(uint8_t address, uint8_t reg, uint8_t value) {
@@ -165,6 +186,13 @@ void initMicrophones() {
     Serial.println("PDM microphone I2S initialization failed");
     return;
   }
+  i2s_chan_info_t info = {};
+  const esp_err_t infoError = i2s_channel_get_info(microphoneI2s.rxChan(), &info);
+  if (infoError == ESP_OK) {
+    Serial.printf("PDM RX allocated I2S port: %d\n", static_cast<int>(info.id));
+  } else {
+    Serial.printf("Failed to query PDM RX I2S port: %s\n", esp_err_to_name(infoError));
+  }
   // Arduino's default 8S decimation drives 16 kHz * 64 = 1.024 MHz,
   // between this microphone's specified low-power and normal clock ranges.
   // 16S makes the clock 2.048 MHz while preserving 16 kHz PCM output.
@@ -194,7 +222,7 @@ void speakerPlaybackTask(void *) {
       vTaskDelay(pdMS_TO_TICKS(1));
       continue;
     }
-    // Prime half the 8 KiB queue before starting. This gives short Wi-Fi
+    // Prime half the 32 KiB queue before starting. This gives short Wi-Fi
     // pauses room to recover; a shorter file starts once its upload ends.
     if (!started) {
       if (uxQueueMessagesWaiting(speakerQueue) < SPEAKER_BUFFER_CHUNKS / 2 &&
@@ -224,6 +252,12 @@ void initSpeaker() {
   speakerI2s.setTimeout(1000);
   speakerReady = speakerI2s.begin(I2S_MODE_STD, SPEAKER_SAMPLE_RATE,
     I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH);
+  // Play the boot chime before reserving the 32 KiB streaming queue. I2S TX
+  // needs its largest free heap during initialization and first playback.
+  if (speakerReady && expanderReady) {
+    startupChimePlayed = playStartupChime();
+    Serial.printf("PSF startup chime played=%d\n", startupChimePlayed);
+  }
   if (speakerReady) {
     speakerQueue = xQueueCreate(SPEAKER_BUFFER_CHUNKS, sizeof(SpeakerPcmChunk));
     speakerReady = speakerQueue != nullptr &&
@@ -242,20 +276,21 @@ void initExpander() {
   if (!i2cPresent(TCA9534_ADDRESS)) return;
   // Hold all ToFs in reset while assigning distinct addresses to the two
   // VL53L1CB devices. P3 high also held the wide VL53L5CX off on the bench.
-  // P4 drives the MAX98357A SD_MODE# input: output-high enables the amp.
+  // P4 drives MAX98357A SD_MODE#. Hold it LOW (amp shutdown) until I2S is
+  // initialized and primed with silence; enabling it here caused a pop.
   // P5-P7 remain inputs until their board-control nets are verified.
   for (uint8_t attempt = 0; attempt < 5 && !expanderReady; ++attempt) {
-    const bool outputSet = writeExpander(0x01, 0x08 | SPEAKER_ENABLE_MASK);
+    const bool outputSet = writeExpander(0x01, 0x08);
     const bool directionSet = writeExpander(0x03, 0xE0);
     uint8_t output = 0, direction = 0, input = 0;
     const bool outputVerified = readRegister8(TCA9534_ADDRESS, 0x01, &output) &&
-      output == (0x08 | SPEAKER_ENABLE_MASK);
+      output == 0x08;
     const bool directionVerified = readRegister8(TCA9534_ADDRESS, 0x03, &direction) &&
       direction == 0xE0;
     const bool pinVerified = readRegister8(TCA9534_ADDRESS, 0x00, &input) &&
-      (input & SPEAKER_ENABLE_MASK) != 0;
-    speakerAmpEnabled = outputVerified && directionVerified && pinVerified;
-    expanderReady = outputSet && directionSet && speakerAmpEnabled;
+      (input & SPEAKER_ENABLE_MASK) == 0;
+    expanderReady = outputSet && directionSet && outputVerified &&
+      directionVerified && pinVerified;
     if (!expanderReady) delay(50);
   }
 }
@@ -274,15 +309,104 @@ bool ensureSpeakerAmpEnabled() {
   return speakerAmpEnabled;
 }
 
+bool muteSpeakerAmp() {
+  // Keep P4 low while the I2S TX path is reconfigured between uploads.
+  uint8_t output = 0, direction = 0, input = 0;
+  if (!readRegister8(TCA9534_ADDRESS, 0x01, &output) ||
+      !readRegister8(TCA9534_ADDRESS, 0x03, &direction)) return false;
+  if (!writeExpander(0x01, output & ~SPEAKER_ENABLE_MASK) ||
+      !writeExpander(0x03, direction & ~SPEAKER_ENABLE_MASK)) return false;
+  if (!readRegister8(TCA9534_ADDRESS, 0x00, &input) ||
+      (input & SPEAKER_ENABLE_MASK) != 0) return false;
+  speakerAmpEnabled = false;
+  return true;
+}
+
+bool prepareSpeakerPcmStream() {
+  if (!speakerReady || !muteSpeakerAmp() || !speakerI2s.configureTX(
+      SPEAKER_SAMPLE_RATE, I2S_DATA_BIT_WIDTH_16BIT,
+      I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH)) return false;
+  // Match boot playback: establish quiet I2S clocks before unmuting P4.
+  static const int16_t silence[256 * 2] = {};
+  if (speakerI2s.write(reinterpret_cast<const uint8_t *>(silence), sizeof(silence))
+      != sizeof(silence)) return false;
+  delay(20);
+  if (!ensureSpeakerAmpEnabled()) return false;
+  return speakerI2s.write(reinterpret_cast<const uint8_t *>(silence), sizeof(silence))
+    == sizeof(silence);
+}
+
+bool playStartupChime() {
+  startupChimeStage = "precheck";
+  if (!speakerReady || !expanderReady || kStartupChimeBytes % 2 != 0) return false;
+  startupChimeStage = "configure";
+  if (!speakerI2s.configureTX(SPEAKER_SAMPLE_RATE, I2S_DATA_BIT_WIDTH_16BIT,
+                              I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH)) return false;
+  // Establish stable BCLK/LRCLK/DIN while the amplifier is still shut down.
+  static const int16_t silence[256 * 2] = {};
+  startupChimeStage = "prime";
+  if (speakerI2s.write(reinterpret_cast<const uint8_t *>(silence), sizeof(silence))
+      != sizeof(silence)) {
+    startupChimeI2sError = speakerI2s.lastError();
+    return false;
+  }
+  delay(20);
+  startupChimeStage = "enable-amp";
+  if (!ensureSpeakerAmpEnabled()) return false;
+  startupChimeStage = "post-enable-silence";
+  if (speakerI2s.write(reinterpret_cast<const uint8_t *>(silence), sizeof(silence))
+      != sizeof(silence)) {
+    startupChimeI2sError = speakerI2s.lastError();
+    return false;
+  }
+
+  static constexpr size_t BLOCK_FRAMES = 256;
+  const size_t totalFrames = kStartupChimeBytes / sizeof(int16_t);
+  int16_t stereo[BLOCK_FRAMES * 2];
+  startupChimeStage = "pcm";
+  for (size_t start = 0; start < totalFrames; start += BLOCK_FRAMES) {
+    const size_t frames = min(BLOCK_FRAMES, totalFrames - start);
+    for (size_t i = 0; i < frames; ++i) {
+      const size_t frame = start + i;
+      const size_t offset = frame * 2;
+      const uint16_t bits = static_cast<uint16_t>(kStartupChimePcm[offset]) |
+        (static_cast<uint16_t>(kStartupChimePcm[offset + 1]) << 8);
+      const int16_t mono = static_cast<int16_t>(bits);
+      uint32_t fade = STARTUP_CHIME_FADE_FRAMES;
+      if (frame < fade) fade = frame;
+      if (totalFrames - 1 - frame < fade) fade = totalFrames - 1 - frame;
+      const int32_t sample = static_cast<int32_t>(mono) *
+        STARTUP_CHIME_GAIN_PERCENT * fade /
+        (100 * STARTUP_CHIME_FADE_FRAMES);
+      stereo[2 * i] = static_cast<int16_t>(sample);
+      stereo[2 * i + 1] = static_cast<int16_t>(sample);
+    }
+    const size_t bytes = frames * 2 * sizeof(int16_t);
+    if (speakerI2s.write(reinterpret_cast<const uint8_t *>(stereo), bytes) != bytes) {
+      startupChimeI2sError = speakerI2s.lastError();
+      return false;
+    }
+    startupChimeBytesWritten += bytes;
+  }
+  startupChimeStage = "tail";
+  if (speakerI2s.write(reinterpret_cast<const uint8_t *>(silence), sizeof(silence))
+      != sizeof(silence)) {
+    startupChimeI2sError = speakerI2s.lastError();
+    return false;
+  }
+  startupChimeStage = "complete";
+  return true;
+}
+
 bool initNarrowTof(VL53L1X &sensor, uint8_t pinMask,
                    uint8_t address, uint8_t *activePins) {
-  const uint8_t enabled = 0x08 | SPEAKER_ENABLE_MASK | *activePins | pinMask;
+  const uint8_t enabled = 0x08 | *activePins | pinMask;
   if (!writeExpander(0x01, enabled)) return false;
   delay(20);
   sensor.setBus(&Wire);
   sensor.setTimeout(500);
   if (!sensor.init()) {
-    writeExpander(0x01, 0x08 | SPEAKER_ENABLE_MASK | *activePins);
+    writeExpander(0x01, 0x08 | *activePins);
     return false;
   }
   sensor.setAddress(address);
@@ -290,7 +414,7 @@ bool initNarrowTof(VL53L1X &sensor, uint8_t pinMask,
   if (!i2cPresent(address) ||
       !sensor.setDistanceMode(VL53L1X::Short) ||
       !sensor.setMeasurementTimingBudget(50000)) {
-    writeExpander(0x01, 0x08 | SPEAKER_ENABLE_MASK | *activePins);
+    writeExpander(0x01, 0x08 | *activePins);
     return false;
   }
   *activePins |= pinMask;
@@ -305,7 +429,7 @@ void initTofSensors() {
 
   // The wide sensor retains the default address while the two narrow parts
   // stay powered at 0x30/0x31. P2 high + P3 low was confirmed on the bench.
-  if (!writeExpander(0x01, SPEAKER_ENABLE_MASK | activePins | 0x04)) return;
+  if (!writeExpander(0x01, activePins | 0x04)) return;
   delay(100);
   if (!i2cPresent(0x29)) return;
   wideTofReady = wideTof.begin(0x29, &Wire, 400000) &&
@@ -396,6 +520,10 @@ void sendHealth() {
   body += ",\"microphonesReady\":" + String(microphonesReady ? "true" : "false");
   body += ",\"speakerReady\":" + String(speakerReady ? "true" : "false");
   body += ",\"speakerAmpEnabled\":" + String(speakerAmpEnabled ? "true" : "false");
+  body += ",\"startupChimePlayed\":" + String(startupChimePlayed ? "true" : "false");
+  body += ",\"startupChimeStage\":\"" + String(startupChimeStage) + "\"";
+  body += ",\"startupChimeBytesWritten\":" + String(startupChimeBytesWritten);
+  body += ",\"startupChimeI2sError\":" + String(startupChimeI2sError);
   body += ",\"ledsReady\":" + String(ledsReady ? "true" : "false");
   body += ",\"rssi\":" + String(WiFi.RSSI()) + "}";
   cameraServer.send(200, "application/json", body);
@@ -493,6 +621,10 @@ void sendDiagnostics() {
   body += ",\"microphonesReady\":" + String(microphonesReady ? "true" : "false");
   body += ",\"speakerReady\":" + String(speakerReady ? "true" : "false");
   body += ",\"speakerAmpEnabled\":" + String(speakerAmpEnabled ? "true" : "false");
+  body += ",\"startupChimePlayed\":" + String(startupChimePlayed ? "true" : "false");
+  body += ",\"startupChimeStage\":\"" + String(startupChimeStage) + "\"";
+  body += ",\"startupChimeBytesWritten\":" + String(startupChimeBytesWritten);
+  body += ",\"startupChimeI2sError\":" + String(startupChimeI2sError);
   body += ",\"imuWhoAmI\":" + String(imuWhoAmI);
   uint8_t imuGyroConfig = 0, imuAccelConfig = 0, imuPower = 0;
   const bool imuGyroReadable = readRegister8(IMU_ADDRESS, 0x20, &imuGyroConfig);
@@ -809,6 +941,166 @@ void sendMicrophoneRawClockTest() {
   diagnosticServer.send(running && microphonesReady ? 200 : 500, "application/json", body);
 }
 
+esp_err_t countRisingEdges(uint8_t pin, int *count) {
+  // Five milliseconds keeps a 2.048 MHz clock below PCNT's 16-bit limit.
+  pcnt_unit_config_t unitConfig = {};
+  unitConfig.low_limit = -32768;
+  unitConfig.high_limit = 32767;
+  pcnt_unit_handle_t unit = nullptr;
+  pcnt_channel_handle_t channel = nullptr;
+  bool enabled = false;
+  bool started = false;
+  esp_err_t result = pcnt_new_unit(&unitConfig, &unit);
+  if (result != ESP_OK) return result;
+  pcnt_chan_config_t channelConfig = {};
+  channelConfig.edge_gpio_num = pin;
+  channelConfig.level_gpio_num = -1;
+  result = pcnt_new_channel(unit, &channelConfig, &channel);
+  if (result == ESP_OK) {
+    result = pcnt_channel_set_edge_action(channel,
+      PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_HOLD);
+  }
+  if (result == ESP_OK) {
+    // PCNT may enable a pull-up while attaching its input. Measure the net
+    // with no internal bias, as the microphones normally drive it.
+    gpio_pullup_dis(static_cast<gpio_num_t>(pin));
+    gpio_pulldown_dis(static_cast<gpio_num_t>(pin));
+    result = pcnt_unit_enable(unit);
+    enabled = result == ESP_OK;
+  }
+  if (result == ESP_OK) result = pcnt_unit_clear_count(unit);
+  if (result == ESP_OK) {
+    result = pcnt_unit_start(unit);
+    started = result == ESP_OK;
+  }
+  if (result == ESP_OK) {
+    delayMicroseconds(5000);
+    result = pcnt_unit_stop(unit);
+    started = false;
+  }
+  if (result == ESP_OK) result = pcnt_unit_get_count(unit, count);
+  if (started) pcnt_unit_stop(unit);
+  if (enabled) pcnt_unit_disable(unit);
+  if (channel) pcnt_del_channel(channel);
+  pcnt_del_unit(unit);
+  return result;
+}
+
+void sendMicrophonePcntTest() {
+  if (!microphonesReady) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"microphone I2S unavailable\"}");
+    return;
+  }
+  if (!microphoneI2s.end()) {
+    microphonesReady = false;
+    diagnosticServer.send(500, "application/json", "{\"ok\":false,\"error\":\"could not stop microphone I2S\"}");
+    return;
+  }
+  microphonesReady = false;
+  const gpio_num_t dataPin = static_cast<gpio_num_t>(MIC_PDM_DATA);
+  pinMode(MIC_PDM_DATA, INPUT);
+  gpio_pullup_dis(dataPin);
+  gpio_pulldown_dis(dataPin);
+  const bool attached = ledcAttachChannel(MIC_PDM_CLK, MIC_PDM_CLOCK_HZ, 1, 7);
+  const bool running = attached && ledcWrite(MIC_PDM_CLK, 1);
+  const uint32_t actualClockHz = running ? ledcReadFreq(MIC_PDM_CLK) : 0;
+  int dataEdges = -1, clockEdges = -1;
+  esp_err_t dataError = ESP_ERR_INVALID_STATE;
+  esp_err_t clockError = ESP_ERR_INVALID_STATE;
+  if (running) {
+    delay(30); // microphone wake-up maximum is 20 ms
+    dataError = countRisingEdges(MIC_PDM_DATA, &dataEdges);
+    gpio_input_enable(static_cast<gpio_num_t>(MIC_PDM_CLK));
+    clockError = countRisingEdges(MIC_PDM_CLK, &clockEdges);
+  }
+  if (attached) ledcDetach(MIC_PDM_CLK);
+  pinMode(MIC_PDM_CLK, INPUT);
+  pinMode(MIC_PDM_DATA, INPUT);
+  initMicrophones();
+  const bool ok = running && dataError == ESP_OK && clockError == ESP_OK && microphonesReady;
+  String body = "{\"ok\":" + String(ok ? "true" : "false");
+  body += ",\"independentClockHz\":" + String(actualClockHz);
+  body += ",\"windowUs\":5000,\"dataRisingEdges\":" + String(dataEdges);
+  body += ",\"clockRisingEdges\":" + String(clockEdges);
+  body += ",\"dataPcntError\":\"" + String(esp_err_to_name(dataError)) + '"';
+  body += ",\"clockPcntError\":\"" + String(esp_err_to_name(clockError)) + '"';
+  body += ",\"pdmCaptureRestored\":" + String(microphonesReady ? "true" : "false") + '}';
+  diagnosticServer.send(ok ? 200 : 500, "application/json", body);
+}
+
+void holdMicrophoneClock(uint8_t level) {
+  if (!micClockHeld) {
+    if (!microphonesReady || !microphoneI2s.end()) {
+      diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"could not stop microphone I2S\"}");
+      return;
+    }
+    microphonesReady = false;
+  }
+  // Claim the pad with the ESP-IDF GPIO driver after I2S releases it. This
+  // also enables input readback while the output is held for a DMM check.
+  const gpio_num_t pin = static_cast<gpio_num_t>(MIC_PDM_CLK);
+  gpio_config_t config = {};
+  config.pin_bit_mask = 1ULL << MIC_PDM_CLK;
+  config.mode = GPIO_MODE_INPUT_OUTPUT;
+  config.pull_up_en = GPIO_PULLUP_DISABLE;
+  config.pull_down_en = GPIO_PULLDOWN_DISABLE;
+  config.intr_type = GPIO_INTR_DISABLE;
+  const esp_err_t reset = gpio_reset_pin(pin);
+  const esp_err_t configured = reset == ESP_OK ? gpio_config(&config) : reset;
+  const esp_err_t driven = configured == ESP_OK ? gpio_set_level(pin, level) : configured;
+  if (driven != ESP_OK) {
+    micClockHeld = false;
+    micClockHeldLevel = -1;
+    gpio_reset_pin(pin);
+    initMicrophones();
+    diagnosticServer.send(500, "application/json",
+      "{\"ok\":false,\"error\":\"GPIO clock hold failed: " + String(esp_err_to_name(driven)) + "\"}");
+    return;
+  }
+  micClockHeld = true;
+  micClockHeldLevel = level;
+  delay(1);
+  const int padLevel = gpio_get_level(pin);
+  String body = "{\"ok\":true,\"clockPin\":" + String(MIC_PDM_CLK);
+  body += ",\"heldLevel\":" + String(level);
+  body += ",\"padLevel\":" + String(padLevel) + '}';
+  diagnosticServer.send(200, "application/json", body);
+}
+
+void holdMicrophoneClockLow() { holdMicrophoneClock(0); }
+void holdMicrophoneClockHigh() { holdMicrophoneClock(1); }
+
+void sendMicrophoneHeldClockEdges() {
+  if (!micClockHeld) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"microphone clock is not held\"}");
+    return;
+  }
+  int edges = -1;
+  const esp_err_t error = countRisingEdges(MIC_PDM_CLK, &edges);
+  String body = "{\"ok\":" + String(error == ESP_OK ? "true" : "false");
+  body += ",\"clockPin\":" + String(MIC_PDM_CLK);
+  body += ",\"heldLevel\":" + String(micClockHeldLevel);
+  body += ",\"padLevel\":" + String(gpio_get_level(static_cast<gpio_num_t>(MIC_PDM_CLK)));
+  body += ",\"windowUs\":5000,\"risingEdges\":" + String(edges);
+  body += ",\"pcntError\":\"" + String(esp_err_to_name(error)) + "\"}";
+  diagnosticServer.send(error == ESP_OK ? 200 : 500, "application/json", body);
+}
+
+void restoreMicrophoneClock() {
+  if (!micClockHeld) {
+    diagnosticServer.send(200, "application/json", "{\"ok\":true,\"held\":false,\"pdmCaptureRestored\":" + String(microphonesReady ? "true" : "false") + '}');
+    return;
+  }
+  gpio_reset_pin(static_cast<gpio_num_t>(MIC_PDM_CLK));
+  micClockHeld = false;
+  micClockHeldLevel = -1;
+  initMicrophones();
+  const bool ok = microphonesReady;
+  diagnosticServer.send(ok ? 200 : 500, "application/json",
+    "{\"ok\":" + String(ok ? "true" : "false") +
+    ",\"held\":false,\"pdmCaptureRestored\":" + String(ok ? "true" : "false") + '}');
+}
+
 void sendMicrophoneWav() {
   if (!microphonesReady) {
     diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"microphones unavailable\"}");
@@ -903,9 +1195,7 @@ void receiveSpeakerPcm() {
     speakerPcmPlayedBytes = 0;
     speakerPcmPendingSize = 0;
     speakerPcmUploadComplete = false;
-    speakerPcmUploadFailed = !speakerReady || !ensureSpeakerAmpEnabled() || !speakerI2s.configureTX(
-      SPEAKER_SAMPLE_RATE, I2S_DATA_BIT_WIDTH_16BIT,
-      I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH);
+    speakerPcmUploadFailed = !prepareSpeakerPcmStream();
     if (!speakerPcmUploadFailed) speakerPcmStreaming = true;
   } else if (upload.status == UPLOAD_FILE_WRITE) {
     if (speakerPcmUploadFailed) return;
@@ -998,6 +1288,7 @@ void setup() {
   Serial.println("PSF Sensor Board v1.3 bring-up firmware");
   Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(400000);
+  muteSpeakerAmpEarly();
   ledsReady = rmtInit(LED_PIN, RMT_TX_MODE, RMT_MEM_NUM_BLOCKS_1, 10000000);
   if (ledsReady) showLeds(); // all off at boot
   cameraReady = initCamera();
@@ -1028,6 +1319,11 @@ void setup() {
   diagnosticServer.on("/mic-live-pull-test", HTTP_GET, sendMicrophoneLivePullTest);
   diagnosticServer.on("/mic-line-test", HTTP_GET, sendMicrophoneLineTest);
   diagnosticServer.on("/mic-raw-clock-test", HTTP_GET, sendMicrophoneRawClockTest);
+  diagnosticServer.on("/mic-pcnt-test", HTTP_GET, sendMicrophonePcntTest);
+  diagnosticServer.on("/mic-clock-low", HTTP_POST, holdMicrophoneClockLow);
+  diagnosticServer.on("/mic-clock-high", HTTP_POST, holdMicrophoneClockHigh);
+  diagnosticServer.on("/mic-clock-edges", HTTP_GET, sendMicrophoneHeldClockEdges);
+  diagnosticServer.on("/mic-clock-restore", HTTP_POST, restoreMicrophoneClock);
   diagnosticServer.on("/mic-capture.wav", HTTP_GET, sendMicrophoneWav);
   diagnosticServer.on("/speaker-test", HTTP_POST, sendSpeakerTest);
   diagnosticServer.on("/speaker-pcm", HTTP_POST, sendSpeakerPcm, receiveSpeakerPcm);

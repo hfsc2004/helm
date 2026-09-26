@@ -31,6 +31,8 @@ export interface TemplateManifest {
   fqbn: string;
   core: string;
   libraries?: Array<{ name: string; version: string }>;
+  /** Additional sketch-local files (for example generated audio headers). */
+  sketchFiles?: string[];
   vehicleKind?: string;
   capabilities?: string[];
   vars: TemplateVar[];

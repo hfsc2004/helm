@@ -5,6 +5,24 @@ All notable changes to PSF Helm will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.5] - 2026-09-26
+
+### Added
+- Bundle `PSF_Chime.wav` as the Sensor Board v1.3 boot sound at 50% playback
+  level, with a reproducible generator for its flash-resident PCM header.
+- Stage auxiliary firmware headers during Helm flash and add a microphone-clock
+  diagnostic command for the ongoing GPIO14/GPIO21 bring-up.
+
+### Changed
+- Increase the board-side streamed-audio queue from 8 KiB to 32 KiB and mute
+  the amplifier while reconfiguring I²S before each stream.
+- Play the boot chime before allocating the streaming queue, and report its
+  playback stage and I²S error in diagnostics.
+
+### Known issues
+- PDM microphone data remains flat on the tested board; the physical or
+  firmware cause has not been confirmed.
+
 ## [0.3.4] - 2026-09-25
 
 ### Added

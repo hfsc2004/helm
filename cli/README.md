@@ -27,7 +27,7 @@ npm run helm -- vehicle-speaker-play <vehicle-id> <audio-file>
 ```
 
 Helm decodes to 16 kHz signed 16-bit stereo PCM and streams it to the board's
-port-82 `/speaker-pcm` endpoint. The board buffers 8 KiB and applies
+port-82 `/speaker-pcm` endpoint. The board buffers 32 KiB and applies
 backpressure; the entire audio file is not loaded into board memory. By
 default the command derives the host from the vehicle's camera URL; use
 `--base-url http://<board-ip>:82` if that address differs. The vehicle must be

@@ -50,6 +50,20 @@ for this v1.3 bring-up configuration.
   2.048 MHz clock on GPIO21, reads GPIO14 as plain GPIO for highs/transitions
   with no pull and with a weak pull-up, then restores PDM capture. This
   separates microphone DATA activity from the I²S receiver configuration.
+  `GET /mic-pcnt-test` uses the same independent clock but counts GPIO14
+  rising edges in hardware over 5 ms, avoiding software-polling aliasing.
+  It also counts GPIO21 edges as a clock/control check; a zero DATA count
+  is meaningful only if the clock count is nonzero. The endpoint restores
+  PDM capture before responding.
+  For a DC multimeter check, `POST /mic-clock-low` or
+  `POST /mic-clock-high` stops microphone I²S and holds GPIO21 as an output
+  at 0 or 3.3 V until `POST /mic-clock-restore` (or a reboot) restores the
+  normal PDM clock. Microphone capture is unavailable while held.
+  `GET /mic-clock-edges` counts GPIO21 rising edges over 5 ms while held,
+  distinguishing a static level from a clock the DC meter would average.
+  Helm exposes these as `helm vehicle-mic-clock <id> low|high|edges|restore`;
+  use the vehicle's registered camera
+  host automatically, or pass `--base-url http://<board-ip>:82`.
   `GET /mic-live-pull-test` leaves the PDM clock running, briefly applies
   a weak internal pull-up to GPIO14, and removes it after sampling.
   The ESP32-S3 PDM RX decimation is set to 16S, producing a configured
@@ -72,9 +86,24 @@ for this v1.3 bring-up configuration.
   output-high (`expanderConfig=224`, `expanderInput=23`), the 100 KiB sample
   streamed successfully, and the user heard it. The tone endpoint also
   returned success, though its audibility was not separately confirmed.
+  The current template changes that startup order: it holds P4 low while the
+  ToF devices and speaker I²S initialize (with an early best-effort shutdown
+  as soon as I²C starts), writes silence to establish the
+  audio clocks, then enables P4 and plays `PSF_Chime.wav` once at boot.
+  The bundled `startup_chime.h` is the 1.55-second source converted from
+  44.1 kHz stereo to 16 kHz mono PCM; playback duplicates the samples into
+  both I²S slots at 50% gain with short fades. Regenerate the header with
+  `node firmware/templates/sensor-board-v1-3-esp32s3/generate-startup-chime.mjs`.
+  Helm stages the header with the sketch on every flash. The boot chime now
+  plays before allocating the 32 KiB streaming queue, preserving heap during
+  its first I²S writes. If the expander or speaker I²S is unavailable,
+  the chime is skipped. This order is intended to reduce the initialization
+  pop, but its acoustic result still needs a live-board test. `/health` and
+  `/diagnostics` report `startupChimePlayed` so a missed boot sound can be
+  distinguished from an initialization failure.
   `POST /speaker-pcm` accepts a multipart form file (field name `file`) of
   16 kHz, signed 16-bit, little-endian, stereo interleaved PCM. It writes
-  incoming chunks into an 8 KiB board-side playback queue, prebuffers about
+  incoming chunks into a 32 KiB board-side playback queue, prebuffers about
   half of it, and drains the queue to I²S from a dedicated task. The upload
   pauses when the queue is full, so it does not load the whole file into ESP32
   RAM. A separate four-byte buffer aligns stereo frames at chunk boundaries.
@@ -143,6 +172,40 @@ configuration problem. It does **not** establish whether clock reaches the
 actual microphone pins, whether their solder joints/data trace are intact,
 or whether both microphone ICs are producing data. Those require a physical
 signal check at a microphone or another independent observation point.
+On a fresh boot, I²S PDM RX allocated port 0, excluding accidental I²S1
+selection. The subsequent independent PCNT test counted 0 GPIO14 DATA
+rising edges in each of three 5 ms windows, while GPIO21 CLK counted
+10,245–10,246 rising edges per window at 2.048 MHz. Both counters reported
+`ESP_OK`, and PDM capture was restored after each test. `/mic-levels` still
+reported both channels fixed at `-30935` with zero AC RMS. Hardware edge
+counting removes software-polling aliasing as an explanation for the zero
+DATA transitions. It confirms the clock at the ESP32 pin, not at the
+microphone packages; a clock-path, DATA-path, solder, or microphone-power
+fault remains possible.
+For a multimeter check at the module-side GPIO21 point, normal PDM clock
+read about 1.64 V DC and a commanded high hold read 3.27 V. Two commanded
+low holds read about 1.7–1.8 V on the user's meter even though ESP32
+digital readback was low. A follow-up hardware PCNT count during the held-low
+state found **zero GPIO21 rising edges in 5 ms** (`ESP_OK`), then restored
+PDM capture. Thus a full-swing 2.048 MHz clock still running at the ESP32
+pad is not supported; the analog midrail reading at the probe point remains
+unexplained. Do not infer a specific bad trace or component from this alone.
+The ESP32-S3-CAM module was then replaced with another module of the same
+type and flashed with the same firmware. On the replacement, Wi-Fi joined at
+`172.20.0.178` and remained reachable after a USB reset. Microphone capture
+was unchanged: both channels stayed at `-30935` with zero AC RMS. The
+independent PCNT test counted 0 DATA rising edges on GPIO14 and 10,244 CLK
+rising edges on GPIO21 in 5 ms, then restored PDM capture. This makes a fault
+unique to the original ESP32-S3-CAM module unlikely; it does not yet locate
+the fault on the sensor board or prove the clock reaches either microphone.
+With the replacement module installed, the west socket GPIO21 contact read
+about 1.64 V DC under the normal clock, but 2.2 V when Helm held GPIO21
+low. At that same time the ESP32 reported digital pad level 0 and PCNT
+counted zero rising edges in 5 ms. The clock was restored afterward.
+Because the west socket voltage disagrees with a commanded static low on
+both modules, inspect the module-to-socket contact and board-side net before
+inferring microphone failure. A power-off continuity check from the module's
+GPIO21 solder/pin to the west socket contact would directly test that path.
 
 On these later flashes the shared I²C bus was also intermittent: IMU configuration reads
 occasionally failed and one `/imu` burst returned implausible all-`-1` axes.

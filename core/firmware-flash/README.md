@@ -20,6 +20,10 @@ ground-skidsteer-esp32/
 ```
 
 `vars[]` declares typed inputs. `string`, `secret`, `number`, `boolean`. Missing required vars or wrong types fail loudly — no silent coercion.
+`sketchFiles[]` optionally lists header files beside `sketch.ino`; Helm copies
+them into the staged Arduino sketch directory before compiling. Names must be
+plain filenames, not paths. The Sensor Board v1.3 template uses this for its
+boot-chime PCM header.
 
 ## BMOC integration
 

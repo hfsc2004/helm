@@ -158,6 +158,7 @@ const flashCmd: RuntimeCommand = {
       { event: "render", description: "Applying variables." },
       { event: "resolve-toolchain", description: "Finding arduino-cli." },
       { event: "core-install", description: "Installing the board core (one-time, slow)." },
+      { event: "library-install", description: "Installing template sensor libraries when needed." },
       { event: "compile", description: "arduino-cli compile output." },
       { event: "upload", description: "arduino-cli upload output." },
       { event: "complete", description: "Flash finished." },

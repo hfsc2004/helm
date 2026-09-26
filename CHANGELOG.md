@@ -5,6 +5,20 @@ All notable changes to PSF Helm will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-09-25
+
+### Added
+- Bring up all three PSF Sensor Board v1.3 ToF devices concurrently: assign
+  the front/rear VL53L1CB sensors distinct I²C addresses and stream raw 8×8
+  VL53L5CX depth frames with per-zone target status on `/wide-range`.
+- Install each firmware template's pinned Arduino sensor libraries before
+  compiling in Helm's flash flow.
+
+### Verified on hardware
+- Front and rear single-zone ranges, 8×8 depth frames, RGBW LEDs, and camera
+  capture on the ESP32-S3-CAM. The rear sensor's near-zero reading was with
+  the board leaning against a box. Raw ToF values are not collision rules.
+
 ## [0.3.2] - 2026-09-25
 
 ### Fixed

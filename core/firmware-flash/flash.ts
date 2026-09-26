@@ -17,8 +17,9 @@ import { renderSketch } from "./render.js";
  *   1. Load + render the sketch template with the user's vars.
  *   2. Resolve arduino-cli (managed or system).
  *   3. Ensure the relevant board core is installed (one-time, slow).
- *   4. Compile the sketch.
- *   5. Upload to the resolved port.
+ *   4. Ensure template sensor libraries are installed.
+ *   5. Compile the sketch.
+ *   6. Upload to the resolved port.
  *
  * Every subprocess is registered with BMOC so a window-close or app-quit
  * mid-flash cleans up cleanly.
@@ -29,6 +30,7 @@ export type FlashStage =
   | "render"
   | "resolve-toolchain"
   | "core-install"
+  | "library-install"
   | "compile"
   | "upload"
   | "complete"
@@ -214,6 +216,54 @@ async function ensureCore(
   return { ok: true };
 }
 
+async function ensureLibraries(
+  bin: string,
+  baseArgs: string[],
+  env: NodeJS.ProcessEnv,
+  libraries: Array<{ name: string; version: string }>,
+  onProgress: ProgressCallback
+): Promise<{ ok: boolean; reason?: string }> {
+  if (libraries.length === 0) return { ok: true };
+  const check = await runCommandAsync(
+    bin,
+    [...baseArgs, "lib", "list", "--format", "json"],
+    { env, timeoutMs: 30000 }
+  );
+  if (check.error || check.status !== 0) {
+    return { ok: false, reason: diagnoseCoreFailure(check.stderr, "arduino-cli lib list failed") };
+  }
+  let installed: Array<{ library?: { name?: string; version?: string } }>;
+  try {
+    const parsed = JSON.parse(check.stdout) as {
+      installed_libraries?: Array<{ library?: { name?: string; version?: string } }>;
+    };
+    installed = parsed.installed_libraries ?? [];
+  } catch {
+    return { ok: false, reason: "arduino-cli lib list returned invalid JSON" };
+  }
+  for (const library of libraries) {
+    if (installed.some((item) =>
+      item.library?.name === library.name && item.library.version === library.version
+    )) continue;
+    const spec = `${library.name}@${library.version}`;
+    onProgress({ stage: "library-install", message: `installing ${spec}` });
+    const result = await runCommandAsync(
+      bin,
+      [...baseArgs, "lib", "install", spec],
+      {
+        env,
+        timeoutMs: 180000,
+        onStdout: (chunk) => onProgress({ stage: "library-install", message: "downloading", chunk }),
+        onStderr: (chunk) => onProgress({ stage: "library-install", message: "downloading", chunk }),
+      }
+    );
+    if (result.error || result.status !== 0) {
+      return { ok: false, reason: diagnoseCoreFailure(result.stderr, `lib install ${spec} failed`) };
+    }
+  }
+  return { ok: true };
+}
+
 export async function flash(
   req: FlashRequest,
   onProgress: ProgressCallback,
@@ -302,6 +352,18 @@ export async function flash(
   if (!coreResult.ok) {
     onProgress({ stage: "error", message: coreResult.reason ?? "core install failed" });
     return { ok: false, reason: coreResult.reason };
+  }
+
+  const libraryResult = await ensureLibraries(
+    cli.bin,
+    cli.baseArgs,
+    cli.env,
+    tmpl.manifest.libraries ?? [],
+    onProgress
+  );
+  if (!libraryResult.ok) {
+    onProgress({ stage: "error", message: libraryResult.reason ?? "library install failed" });
+    return { ok: false, reason: libraryResult.reason };
   }
 
   // Compile.

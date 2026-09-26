@@ -23,22 +23,132 @@ for this v1.3 bring-up configuration.
   8×8 frame as 64 raw millimeter distances and 64 target-status values,
   with its age in milliseconds. The sensor remains at `0x29`. Live frames
   were received on the bench; raw values are not collision decisions.
+- IMU on port 82: `GET /imu` reads the ICM-42607-C's three accelerometer and
+  three gyro axes in one burst, plus die temperature. It reports both raw
+  counts and nominal g / degrees-per-second values at 100 Hz, ±2 g and
+  ±250 dps settings. Live chip ID `0x61` and repeat samples were verified;
+  a stationary, box-leaning board measured about 1 g in vector magnitude
+  and near-zero angular rate. The first sample showed transient `-1` values
+  on several axes, so consumers should not treat every single sample as
+  calibrated truth. When placed flat on its back, two samples measured
+  approximately X = -0.116 g, Y = -0.008 g, Z = +1.003 g, with near-zero
+  angular rate. The earlier leaning sample was approximately Y = -0.839 g,
+  Z = +0.550 g; this confirms the expected shift toward chip +Z when laid
+  flat. Those two vectors differ by roughly 57 degrees, so the earlier
+  estimated 80–85 degree physical angle is not yet a calibration reference.
+  Axes are in the chip's frame, not a verified truck-forward frame; no
+  mounting correction, bias calibration or sensor fusion is applied.
+- Experimental stereo PDM capture on port 82: `GET /mic-levels` samples both
+  channels for 128 ms and reports DC mean, AC RMS and peak counts;
+  `GET /mic-capture.wav` returns a one-second, 16 kHz, 16-bit stereo WAV.
+  The schematic routes the shared PDM clock to GPIO21 and data to GPIO14,
+  with opposite microphone L/R straps. `GET /mic-pin-test` samples the two
+  GPIO pads to help distinguish a missing clock from a stuck data line.
+  `GET /mic-line-test` briefly stops PDM capture, reads GPIO14 with weak
+  internal pull-up and pull-down, then restores capture.
+  `GET /mic-raw-clock-test` instead stops PDM capture, generates an independent
+  2.048 MHz clock on GPIO21, reads GPIO14 as plain GPIO for highs/transitions
+  with no pull and with a weak pull-up, then restores PDM capture. This
+  separates microphone DATA activity from the I²S receiver configuration.
+  `GET /mic-live-pull-test` leaves the PDM clock running, briefly applies
+  a weak internal pull-up to GPIO14, and removes it after sampling.
+  The ESP32-S3 PDM RX decimation is set to 16S, producing a configured
+  2.048 MHz PDM clock while retaining 16 kHz stereo PCM output;
+  `/mic-levels` reports this as `configuredPdmClockHz`.
+  `microphonesReady` means only that the ESP32 I²S peripheral initialized;
+  it does **not** mean sound has been received. There is no continuous audio
+  stream or voice filtering in this bring-up firmware. These endpoints are
+  accessible to devices on the board's local network and should not be
+  exposed to an untrusted network.
+- Speaker test on port 82: `POST /speaker-test` writes a 350 ms, 660 Hz,
+  low-amplitude tone to both I²S slots and then stops writing audio. Rev 1.3
+  routes MAX98357A DIN to GPIO47, BCLK to GPIO41, and LRCLK to GPIO42.
+  Its SD_MODE# pin is driven by TCA9534 P4, which must be configured as an
+  output-high to enable the amplifier. The first live speaker test was silent
+  even though the I²S writes succeeded: bring-up-8 left P4 as an input.
+  Bring-up-9 drives P4 high at initialization and verifies the input-port
+  reading before playback; `speakerAmpEnabled` reports that pin state, not
+  acoustic output. After flashing bring-up-9, the expander reported P4
+  output-high (`expanderConfig=224`, `expanderInput=23`), the 100 KiB sample
+  streamed successfully, and the user heard it. The tone endpoint also
+  returned success, though its audibility was not separately confirmed.
+  `POST /speaker-pcm` accepts a multipart form file (field name `file`) of
+  16 kHz, signed 16-bit, little-endian, stereo interleaved PCM. It writes
+  incoming chunks into an 8 KiB board-side playback queue, prebuffers about
+  half of it, and drains the queue to I²S from a dedicated task. The upload
+  pauses when the queue is full, so it does not load the whole file into ESP32
+  RAM. A separate four-byte buffer aligns stereo frames at chunk boundaries.
+  Helm's `vehicle-speaker-play` command
+  decodes the source file with local `ffmpeg` and streams that PCM to the
+  board. The 10 KiB, 100 KiB, and 500 KiB MP3 samples are all suitable; the
+  board has no file-size-specific upload cap. From the repository root:
+
+  ```sh
+  curl -X POST http://172.20.0.191:82/speaker-test
+  npm run helm -- vehicle-speaker-play <vehicle-id> sample-10kb.mp3
+  ```
+
+  The Helm command derives the sensor-board host from the configured camera
+  URL and uses port 82; `--base-url http://<board-ip>:82` overrides that.
+  `speakerReady` confirms only I²S initialization, not audible output. The
+  tone and PCM endpoints are bench-only and accessible to other devices on
+  the board's LAN; there is no speech synthesis or authenticated playback
+  service. The Helm command requires `ffmpeg` on the computer.
 - RGBW test on port 82: `GET /led?index=0&r=0&g=0&b=0&w=0`. Index is 0–2;
   channels are 0–255. All LEDs start off. The SK6812 wire order is GRBW.
   On the tested board, index 0 is upper right, index 1 is upper left, and
   index 2 is lower right from the truck's forward-facing perspective (looking
   away from the observer).
-- The TCA9534 holds the two VL53L1CB sensors in reset and releases the
-  VL53L5CX. Only documented P0–P3 are configured as outputs. P4–P7 remain
-  inputs until their board-control roles are confirmed on hardware.
+- The TCA9534 uses P0–P1 for the two VL53L1CB XSHUT lines, P2 for VL53L5CX
+  LPn, P3 for VL53L5CX I2C_RST, and P4 for the speaker amplifier SD_MODE#.
+  P0–P4 are outputs; P5–P7 remain inputs. On the bring-up-9 bench flash,
+  all three ToF readiness flags were true after startup.
 - Wi-Fi STA with DHCP or static IP; `<name>.local` mDNS when available.
 
 ## Still to bring up
 
-Calibrated IMU samples, stereo PDM audio, speaker output, IR emitter control,
-and motor/control integration remain.
-`/diagnostics` returns `null` for its legacy distance and IMU sample fields;
-use `/ranges` and `/wide-range` for actual ToF readings.
+IMU axis-orientation and bias calibration, working stereo PDM capture, speaker
+volume/quality evaluation, IR emitter control, and motor/control integration remain. `/diagnostics` returns
+`null` for its legacy distance and IMU sample fields; use `/ranges`,
+`/wide-range`, and `/imu` for sensor readings.
+
+On the first microphone bench test, the PDM clock on GPIO21 toggled
+(approximately half of 10,000 pad samples high), but GPIO14 stayed low for
+all 10,000 samples. Both channels in the captured WAV were a constant
+`-30935` PCM count and `/mic-levels` reported zero AC RMS. This is **not a
+working microphone result**. A follow-up flash changed the clock from the
+Arduino default 1.024 MHz to 2.048 MHz, within the microphone's specified
+standard-performance range. GPIO14 still stayed low in all 10,000 samples,
+and both channels still returned `-30935` with zero AC RMS. With the
+clock stopped, the no-probe `/mic-line-test` saw GPIO14 high for all 1,000
+pull-up samples and low for all 1,000 pull-down samples, then restored
+capture successfully. This rules out a permanent hard-low at the ESP32 pad,
+but GPIO14 still read low for all 10,000 samples with capture running.
+The user then measured approximately 3.3 V at both microphone decoupling
+capacitors. With PDM running, `/mic-live-pull-test` read GPIO14 high in all
+10,000 samples while the weak pull-up was enabled, versus low in all 1,000
+baseline samples. The pull-up was removed successfully, but GPIO14 then
+remained high in subsequent GPIO sampling while `/mic-levels` still returned
+constant `-30935` audio with zero AC RMS. This argues against a strong
+clock-dependent short and leaves either absent microphone data at the pad or
+an ESP32 PDM input-routing/capture fault to distinguish next.
+Bring-up-10 isolated that distinction further: after stopping PDM I²S, a
+separate LEDC clock ran at 2.048 MHz on GPIO21 (5,101 of 10,000 clock-pad
+samples high). GPIO14, read as ordinary GPIO without pulls, was high 0 of
+10,000 times with zero transitions; a weak pull-up then made it high 10,000
+of 10,000 times. PDM capture was restored, but both PCM channels remained
+fixed at `-30935` with zero AC RMS. This points to no driven microphone DATA
+reaching the ESP32 pad during the test, rather than only a PDM-to-PCM driver
+configuration problem. It does **not** establish whether clock reaches the
+actual microphone pins, whether their solder joints/data trace are intact,
+or whether both microphone ICs are producing data. Those require a physical
+signal check at a microphone or another independent observation point.
+
+On these later flashes the shared I²C bus was also intermittent: IMU configuration reads
+occasionally failed and one `/imu` burst returned implausible all-`-1` axes.
+Do not treat `imuReady` alone as proof of a valid live sample on an unstable
+power/bus setup. `/diagnostics` now reports the IMU's configuration-register
+readbacks to help distinguish an absent chip from failed configuration.
 On the first bench test, the camera streamed successfully over Wi-Fi, while
 the I²C scan returned no devices and `expanderReady` was false. Moving
 expander initialization until after Wi-Fi setup resolved that initial result.
@@ -72,7 +182,7 @@ The template appears in Helm's ESP32-S3 Configure Board list as
 **GSN Robotics - PSF Sensor Board v1.3 (bring-up)**. Its GOOUUU camera pin
 map is fixed by this PCB; do not select an unrelated pin profile. The board's
 own USB-C socket is power-only. Use the ESP32-S3-CAM module's programming
-connector for a future flash, after confirming the module and serial port.
+connector for flashing, after confirming the module and serial port.
 
 The default FQBN is `esp32:esp32:esp32s3:PSRAM=opi`, targeting the photographed
 GOOUUU ESP32-S3-CAM module. Helm installs the pinned Pololu VL53L1X 1.3.1

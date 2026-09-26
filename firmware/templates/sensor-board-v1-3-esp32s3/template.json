@@ -1,7 +1,7 @@
 {
   "id": "sensor-board-v1-3-esp32s3",
   "name": "GSN Robotics - PSF Sensor Board v1.3 (bring-up)",
-  "description": "ESP32-S3-CAM bring-up for PSF Sensor Board v1.3: camera, I2C diagnostics, front/rear ToF ranging, experimental 8x8 ToF, and RGBW LED test. No motor or collision-control changes.",
+  "description": "ESP32-S3-CAM bring-up for PSF Sensor Board v1.3: camera, three ToF devices, IMU, experimental microphones, streamed speaker PCM, and RGBW LEDs. No motor or collision-control changes.",
   "target": "esp32",
   "fqbn": "esp32:esp32:esp32s3:PSRAM=opi",
   "core": "esp32:esp32",

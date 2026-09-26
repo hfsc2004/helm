@@ -8,9 +8,10 @@ Firmware lives in this repo (not a separate one) so the app and the firmware ver
 
 - `ground-skidsteer/` — Arduino sketch for the ESP32 + L298N skid-steer robot. HTTP control on port 8080 with an 800 ms deadman timer.
 - `ground-skidsteer-calibration/` — bench-test sketch for tuning left/right motor balance before flashing the main firmware.
-- `templates/sensor-board-v1-3-esp32s3/` — first PSF Sensor Board v1.3
-  bring-up firmware. Camera streaming was confirmed on hardware. I²C
-  diagnostics currently detect no devices; RGBW control remains unverified.
+- `templates/sensor-board-v1-3-esp32s3/` — PSF Sensor Board v1.3 ESP32-S3-CAM
+  bench firmware. Camera, three ToFs, IMU, RGBW LEDs, and speaker have been
+  tested on hardware. Microphone capture is not working yet; diagnostic
+  endpoints are available. There are no motor or collision-control endpoints.
 
 ## Planned
 

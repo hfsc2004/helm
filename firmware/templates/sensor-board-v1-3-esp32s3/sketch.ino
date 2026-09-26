@@ -51,8 +51,15 @@ static constexpr uint16_t SPEAKER_TONE_MS = 350;
 static constexpr int16_t SPEAKER_TONE_AMPLITUDE = 6000;
 static constexpr size_t SPEAKER_CHUNK_BYTES = 1024;
 static constexpr uint8_t SPEAKER_BUFFER_CHUNKS = 32;
-static constexpr uint8_t STARTUP_CHIME_GAIN_PERCENT = 50;
+static constexpr uint8_t STARTUP_CHIME_GAIN_PERCENT = 30;
 static constexpr uint16_t STARTUP_CHIME_FADE_FRAMES = SPEAKER_SAMPLE_RATE / 50;
+
+constexpr int16_t scaleStartupChimeSample(int16_t sample, int32_t fade) {
+  return static_cast<int16_t>(static_cast<int64_t>(sample) *
+    STARTUP_CHIME_GAIN_PERCENT * fade / (100 * STARTUP_CHIME_FADE_FRAMES));
+}
+static_assert(scaleStartupChimeSample(-10000, STARTUP_CHIME_FADE_FRAMES) == -3000,
+  "startup chime gain must preserve negative samples");
 static constexpr uint8_t LED_PIN = 48;
 static constexpr uint8_t LED_COUNT = 3;
 static constexpr uint8_t CAMERA_PORT = 81;
@@ -104,6 +111,7 @@ volatile bool speakerPcmUploadComplete = false;
 volatile bool speakerPcmUploadFailed = false;
 uint8_t speakerPcmPending[4] = {};
 bool playStartupChime();
+bool showLeds();
 uint8_t speakerPcmPendingSize = 0;
 VL53L5CX_ResultsData wideResults = {};
 bool wideHasFrame = false;
@@ -244,6 +252,68 @@ void speakerPlaybackTask(void *) {
   }
 }
 
+void setStartupLeds(uint8_t blue, uint8_t white, int8_t activeIndex = -1) {
+  for (uint8_t i = 0; i < LED_COUNT; ++i) {
+    const bool active = activeIndex < 0 || activeIndex == i;
+    ledValues[i][0] = 0;
+    ledValues[i][1] = 0;
+    ledValues[i][2] = active ? blue : 0;
+    ledValues[i][3] = active ? white : 0;
+  }
+  showLeds();
+}
+
+void playStartupLedFade() {
+  if (!ledsReady) return;
+  static constexpr uint8_t FRAMES = 25;
+  static constexpr uint32_t DURATION_MS = 1000;
+  static constexpr uint8_t ORDER[LED_COUNT] = {2, 1, 0}; // lower right, upper left, upper right
+  const uint32_t started = millis();
+  for (uint8_t frame = 0; frame <= FRAMES; ++frame) {
+    const float t = static_cast<float>(frame) / FRAMES;
+    const float eased = t * t * (3.0f - 2.0f * t);
+    const float brightness = 6.0f + (13.0f - 6.0f) * eased;
+    const uint8_t blue = static_cast<uint8_t>(roundf(brightness * (1.0f - 0.5f * eased)));
+    const uint8_t white = static_cast<uint8_t>(roundf(brightness)) - blue;
+    const int8_t activeIndex = frame == FRAMES ? -1 :
+      ORDER[min(static_cast<uint8_t>(LED_COUNT - 1),
+                static_cast<uint8_t>(frame * LED_COUNT / FRAMES))];
+    setStartupLeds(blue, white, activeIndex);
+    if (frame < FRAMES) {
+      const uint32_t due = started + DURATION_MS * (frame + 1) / FRAMES;
+      while (millis() < due) delay(1);
+    }
+  }
+}
+
+void updateChimeLeds(size_t frame, size_t totalFrames) {
+  if (!ledsReady || !totalFrames) return;
+  const float t = static_cast<float>(frame) / totalFrames;
+  uint8_t blue = 6, white = 0;
+  if (t < 0.23f) {
+    // The opening strike moves from the chase's blue-white mix to white.
+    const float p = t / 0.23f;
+    const float eased = p * p * (3.0f - 2.0f * p);
+    blue = static_cast<uint8_t>(roundf(7.0f * (1.0f - eased)));
+    white = 13 - blue;
+  } else if (t < 0.78f) {
+    // Follow the audible decay back to dim blue, then hold through the tail.
+    const float p = (t - 0.23f) / (0.78f - 0.23f);
+    const float eased = p * p * (3.0f - 2.0f * p);
+    const float brightness = 13.0f - 7.0f * eased;
+    white = static_cast<uint8_t>(roundf(brightness * (1.0f - eased)));
+    blue = static_cast<uint8_t>(roundf(brightness)) - white;
+  }
+  setStartupLeds(blue, white);
+}
+
+bool runStartupSequence() {
+  playStartupLedFade();
+  const bool played = playStartupChime();
+  if (ledsReady) setStartupLeds(0, 0);
+  return played;
+}
+
 void initSpeaker() {
   // MAX98357A on Rev 1.3: GPIO47 DIN, GPIO41 BCLK, GPIO42 LRCLK.
   // Mono amplifier slot selection is a board strap; send the same PCM to
@@ -255,7 +325,7 @@ void initSpeaker() {
   // Play the boot chime before reserving the 32 KiB streaming queue. I2S TX
   // needs its largest free heap during initialization and first playback.
   if (speakerReady && expanderReady) {
-    startupChimePlayed = playStartupChime();
+    startupChimePlayed = runStartupSequence();
     Serial.printf("PSF startup chime played=%d\n", startupChimePlayed);
   }
   if (speakerReady) {
@@ -338,7 +408,11 @@ bool prepareSpeakerPcmStream() {
 
 bool playStartupChime() {
   startupChimeStage = "precheck";
+  startupChimeBytesWritten = 0;
+  startupChimeI2sError = 0;
   if (!speakerReady || !expanderReady || kStartupChimeBytes % 2 != 0) return false;
+  startupChimeStage = "mute";
+  if (!muteSpeakerAmp()) return false;
   startupChimeStage = "configure";
   if (!speakerI2s.configureTX(SPEAKER_SAMPLE_RATE, I2S_DATA_BIT_WIDTH_16BIT,
                               I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH)) return false;
@@ -365,6 +439,7 @@ bool playStartupChime() {
   int16_t stereo[BLOCK_FRAMES * 2];
   startupChimeStage = "pcm";
   for (size_t start = 0; start < totalFrames; start += BLOCK_FRAMES) {
+    if (start % (BLOCK_FRAMES * 3) == 0) updateChimeLeds(start, totalFrames);
     const size_t frames = min(BLOCK_FRAMES, totalFrames - start);
     for (size_t i = 0; i < frames; ++i) {
       const size_t frame = start + i;
@@ -375,11 +450,11 @@ bool playStartupChime() {
       uint32_t fade = STARTUP_CHIME_FADE_FRAMES;
       if (frame < fade) fade = frame;
       if (totalFrames - 1 - frame < fade) fade = totalFrames - 1 - frame;
-      const int32_t sample = static_cast<int32_t>(mono) *
-        STARTUP_CHIME_GAIN_PERCENT * fade /
-        (100 * STARTUP_CHIME_FADE_FRAMES);
-      stereo[2 * i] = static_cast<int16_t>(sample);
-      stereo[2 * i + 1] = static_cast<int16_t>(sample);
+      // Keep the entire gain/fade calculation signed. Multiplying a negative
+      // sample by the unsigned fade used to wrap it into harsh distortion.
+      const int16_t sample = scaleStartupChimeSample(mono, static_cast<int32_t>(fade));
+      stereo[2 * i] = sample;
+      stereo[2 * i + 1] = sample;
     }
     const size_t bytes = frames * 2 * sizeof(int16_t);
     if (speakerI2s.write(reinterpret_cast<const uint8_t *>(stereo), bytes) != bytes) {
@@ -388,6 +463,7 @@ bool playStartupChime() {
     }
     startupChimeBytesWritten += bytes;
   }
+  if (ledsReady) setStartupLeds(6, 0);
   startupChimeStage = "tail";
   if (speakerI2s.write(reinterpret_cast<const uint8_t *>(silence), sizeof(silence))
       != sizeof(silence)) {
@@ -1171,6 +1247,33 @@ void sendSpeakerTest() {
     ",\"durationMs\":" + String(SPEAKER_TONE_MS) + "}");
 }
 
+void sendSpeakerChime() {
+  if (speakerPcmStreaming) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"speaker stream in progress\"}");
+    return;
+  }
+  const bool played = playStartupChime();
+  if (ledsReady) setStartupLeds(0, 0);
+  String body = "{\"ok\":" + String(played ? "true" : "false");
+  body += ",\"stage\":\"" + String(startupChimeStage) + "\"";
+  body += ",\"bytesWritten\":" + String(startupChimeBytesWritten);
+  body += ",\"i2sError\":" + String(startupChimeI2sError) + "}";
+  diagnosticServer.send(played ? 200 : 503, "application/json", body);
+}
+
+void sendStartupSequence() {
+  if (speakerPcmStreaming) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"speaker stream in progress\"}");
+    return;
+  }
+  const bool played = runStartupSequence();
+  String body = "{\"ok\":" + String(played ? "true" : "false");
+  body += ",\"stage\":\"" + String(startupChimeStage) + "\"";
+  body += ",\"bytesWritten\":" + String(startupChimeBytesWritten);
+  body += ",\"i2sError\":" + String(startupChimeI2sError) + "}";
+  diagnosticServer.send(played ? 200 : 503, "application/json", body);
+}
+
 bool queueSpeakerPcm(const uint8_t *data, size_t bytes) {
   while (bytes) {
     SpeakerPcmChunk chunk;
@@ -1326,6 +1429,8 @@ void setup() {
   diagnosticServer.on("/mic-clock-restore", HTTP_POST, restoreMicrophoneClock);
   diagnosticServer.on("/mic-capture.wav", HTTP_GET, sendMicrophoneWav);
   diagnosticServer.on("/speaker-test", HTTP_POST, sendSpeakerTest);
+  diagnosticServer.on("/speaker-chime", HTTP_POST, sendSpeakerChime);
+  diagnosticServer.on("/startup-sequence", HTTP_POST, sendStartupSequence);
   diagnosticServer.on("/speaker-pcm", HTTP_POST, sendSpeakerPcm, receiveSpeakerPcm);
   diagnosticServer.on("/led", HTTP_GET, setLed);
   diagnosticServer.begin();

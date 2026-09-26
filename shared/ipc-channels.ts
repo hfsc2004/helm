@@ -159,6 +159,7 @@ export type FlashStreamStage =
   | "render"
   | "resolve-toolchain"
   | "core-install"
+  | "library-install"
   | "compile"
   | "upload"
   | "complete"

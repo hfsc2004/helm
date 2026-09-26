@@ -1,9 +1,7 @@
-// PSF Sensor Board v1.3: first hardware bring-up firmware.
-// The drive ESP32 continues to own motors, its IR guard, and the deadman.
-// This image provides camera endpoints on port 81 and diagnostics on port 82.
-// ToF distance, IMU samples, microphones, speaker, IR emitters, and UART
-// telemetry are deliberately not reported as working until their drivers
-// have been brought up on the physical board.
+// PSF Sensor Board v1.3 bench bring-up firmware.
+// Camera endpoints are on port 81; sensors and LED diagnostics are on port 82.
+// No motor endpoint is provided. IMU samples, microphones, speaker, IR
+// emitters, and UART telemetry are not reported until their drivers are tested.
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -11,6 +9,8 @@
 #include <ESPmDNS.h>
 #include <esp_camera.h>
 #include <esp32-hal-rmt.h>
+#include <VL53L1X.h>
+#include <Adafruit_VL53L5CX.h>
 
 static const char *WIFI_SSID = "{{wifi.ssid}}";
 static const char *WIFI_PASSWORD = "{{wifi.password}}";
@@ -24,6 +24,8 @@ static const int JPEG_QUALITY = {{camera.jpegQuality}};
 static constexpr uint8_t I2C_SDA = 2;
 static constexpr uint8_t I2C_SCL = 1;
 static constexpr uint8_t TCA9534_ADDRESS = 0x20;
+static constexpr uint8_t FRONT_TOF_ADDRESS = 0x30;
+static constexpr uint8_t REAR_TOF_ADDRESS = 0x31;
 static constexpr uint8_t LED_PIN = 48;
 static constexpr uint8_t LED_COUNT = 3;
 static constexpr uint8_t CAMERA_PORT = 81;
@@ -42,8 +44,18 @@ WebServer diagnosticServer(DIAGNOSTIC_PORT);
 bool cameraReady = false;
 bool expanderReady = false;
 bool ledsReady = false;
+bool frontTofReady = false;
+bool rearTofReady = false;
+bool wideTofReady = false;
 uint32_t bootMs = 0;
 uint8_t ledValues[LED_COUNT][4] = {};
+VL53L1X frontTof;
+VL53L1X rearTof;
+Adafruit_VL53L5CX wideTof;
+VL53L5CX_ResultsData wideResults = {};
+bool wideHasFrame = false;
+uint32_t wideCapturedAt = 0;
+uint32_t wideLastPollAt = 0;
 
 bool i2cPresent(uint8_t address) {
   Wire.beginTransmission(address);
@@ -57,14 +69,69 @@ bool writeExpander(uint8_t reg, uint8_t value) {
   return Wire.endTransmission() == 0;
 }
 
+bool readRegister8(uint8_t address, uint8_t reg, uint8_t *value) {
+  Wire.beginTransmission(address);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom(address, static_cast<uint8_t>(1)) != 1) return false;
+  *value = Wire.read();
+  return true;
+}
+
 void initExpander() {
+  expanderReady = false;
   if (!i2cPresent(TCA9534_ADDRESS)) return;
-  // Configure only the four pins documented in the v1.3 pinout. P0/P1
-  // hold the two VL53L1CB sensors in reset; P2/P3 release the VL53L5CX.
+  // Hold all ToFs in reset while assigning distinct addresses to the two
+  // VL53L1CB devices. P3 high also held the wide VL53L5CX off on the bench.
   // P4-P7 stay inputs until the remaining board-control nets are verified.
-  const bool outputSet = writeExpander(0x01, 0x0C);
+  const bool outputSet = writeExpander(0x01, 0x08);
   const bool directionSet = writeExpander(0x03, 0xF0);
-  expanderReady = outputSet && directionSet;
+  uint8_t output = 0, direction = 0;
+  const bool outputVerified = readRegister8(TCA9534_ADDRESS, 0x01, &output) && output == 0x08;
+  const bool directionVerified = readRegister8(TCA9534_ADDRESS, 0x03, &direction) && direction == 0xF0;
+  expanderReady = outputSet && directionSet && outputVerified && directionVerified;
+}
+
+bool initNarrowTof(VL53L1X &sensor, uint8_t pinMask,
+                   uint8_t address, uint8_t *activePins) {
+  const uint8_t enabled = 0x08 | *activePins | pinMask;
+  if (!writeExpander(0x01, enabled)) return false;
+  delay(20);
+  sensor.setBus(&Wire);
+  sensor.setTimeout(500);
+  if (!sensor.init()) {
+    writeExpander(0x01, 0x08 | *activePins);
+    return false;
+  }
+  sensor.setAddress(address);
+  delay(2);
+  if (!i2cPresent(address) ||
+      !sensor.setDistanceMode(VL53L1X::Short) ||
+      !sensor.setMeasurementTimingBudget(50000)) {
+    writeExpander(0x01, 0x08 | *activePins);
+    return false;
+  }
+  *activePins |= pinMask;
+  return true;
+}
+
+void initTofSensors() {
+  if (!expanderReady) return;
+  uint8_t activePins = 0;
+  frontTofReady = initNarrowTof(frontTof, 0x01, FRONT_TOF_ADDRESS, &activePins);
+  rearTofReady = initNarrowTof(rearTof, 0x02, REAR_TOF_ADDRESS, &activePins);
+
+  // The wide sensor retains the default address while the two narrow parts
+  // stay powered at 0x30/0x31. P2 high + P3 low was confirmed on the bench.
+  if (!writeExpander(0x01, activePins | 0x04)) return;
+  delay(100);
+  if (!i2cPresent(0x29)) return;
+  wideTofReady = wideTof.begin(0x29, &Wire, 400000) &&
+    wideTof.setResolution(64) &&
+    wideTof.setRangingFrequency(5) &&
+    wideTof.startRanging();
+  Serial.printf("ToF front=%d rear=%d wide=%d\n",
+                frontTofReady, rearTofReady, wideTofReady);
 }
 
 framesize_t selectedFrameSize() {
@@ -137,9 +204,12 @@ void connectWifi() {
 
 void sendHealth() {
   String body = "{\"ok\":true,\"board\":\"psf-sensor-board\",\"revision\":\"1.3\"";
-  body += ",\"firmware\":\"bring-up-1\",\"uptimeMs\":" + String(millis() - bootMs);
+  body += ",\"firmware\":\"bring-up-2\",\"uptimeMs\":" + String(millis() - bootMs);
   body += ",\"cameraReady\":" + String(cameraReady ? "true" : "false");
   body += ",\"expanderReady\":" + String(expanderReady ? "true" : "false");
+  body += ",\"frontTofReady\":" + String(frontTofReady ? "true" : "false");
+  body += ",\"rearTofReady\":" + String(rearTofReady ? "true" : "false");
+  body += ",\"wideTofReady\":" + String(wideTofReady ? "true" : "false");
   body += ",\"ledsReady\":" + String(ledsReady ? "true" : "false");
   body += ",\"rssi\":" + String(WiFi.RSSI()) + "}";
   cameraServer.send(200, "application/json", body);
@@ -221,10 +291,79 @@ void sendDiagnostics() {
     first = false;
   }
   body += "]";
+  uint8_t expanderOutput = 0, expanderConfig = 0;
+  const bool outputReadable = readRegister8(TCA9534_ADDRESS, 0x01, &expanderOutput);
+  const bool configReadable = readRegister8(TCA9534_ADDRESS, 0x03, &expanderConfig);
+  body += ",\"expanderPresent\":" + String(i2cPresent(TCA9534_ADDRESS) ? "true" : "false");
+  body += ",\"expanderOutput\":" + String(outputReadable ? String(expanderOutput) : "null");
+  body += ",\"expanderConfig\":" + String(configReadable ? String(expanderConfig) : "null");
   body += ",\"expanderReady\":" + String(expanderReady ? "true" : "false");
-  body += ",\"tofWideDetected\":" + String(i2cPresent(0x29) ? "true" : "false");
-  body += ",\"imuDetected\":" + String((i2cPresent(0x68) || i2cPresent(0x69)) ? "true" : "false");
+  body += ",\"frontTofReady\":" + String(frontTofReady ? "true" : "false");
+  body += ",\"rearTofReady\":" + String(rearTofReady ? "true" : "false");
+  body += ",\"wideTofReady\":" + String(wideTofReady ? "true" : "false");
+  body += ",\"frontAddressResponds\":" + String(i2cPresent(FRONT_TOF_ADDRESS) ? "true" : "false");
+  body += ",\"rearAddressResponds\":" + String(i2cPresent(REAR_TOF_ADDRESS) ? "true" : "false");
+  body += ",\"tofDefaultAddressResponds\":" + String(i2cPresent(0x29) ? "true" : "false");
+  body += ",\"imuAddressResponds\":" + String((i2cPresent(0x68) || i2cPresent(0x69)) ? "true" : "false");
   body += ",\"distanceMm\":null,\"imuSample\":null}";
+  diagnosticServer.send(200, "application/json", body);
+}
+
+void appendNarrowRange(String &body, const char *name,
+                       VL53L1X &sensor, bool ready) {
+  bool timedOut = false, valid = false;
+  uint16_t mm = 0;
+  int status = -1;
+  if (ready) {
+    mm = sensor.readSingle();
+    timedOut = sensor.timeoutOccurred();
+    if (!timedOut) {
+      status = static_cast<int>(sensor.ranging_data.range_status);
+      valid = sensor.ranging_data.range_status == VL53L1X::RangeValid;
+    }
+  }
+  body += "{\"name\":\"" + String(name) + "\",\"ready\":";
+  body += ready ? "true" : "false";
+  body += ",\"timeout\":";
+  body += timedOut ? "true" : "false";
+  body += ",\"rangeStatus\":" + String(status);
+  body += ",\"distanceMm\":";
+  body += valid ? String(mm) : "null";
+  body += '}';
+}
+
+void sendRanges() {
+  String body = "{\"ok\":true,\"singleZone\":[";
+  appendNarrowRange(body, "front", frontTof, frontTofReady);
+  body += ',';
+  appendNarrowRange(body, "rear", rearTof, rearTofReady);
+  body += "],\"wideReady\":" + String(wideTofReady ? "true" : "false") + '}';
+  diagnosticServer.send(200, "application/json", body);
+}
+
+void sendWideRange() {
+  if (!wideTofReady) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"wide ToF unavailable\"}");
+    return;
+  }
+  if (!wideHasFrame) {
+    diagnosticServer.send(202, "application/json", "{\"ok\":true,\"ready\":false}");
+    return;
+  }
+  String body;
+  body.reserve(1600);
+  body = "{\"ok\":true,\"ready\":true,\"ageMs\":" + String(millis() - wideCapturedAt);
+  body += ",\"rawDistanceMm\":[";
+  for (uint8_t zone = 0; zone < 64; ++zone) {
+    if (zone) body += ',';
+    body += String(wideResults.distance_mm[zone]);
+  }
+  body += "],\"targetStatus\":[";
+  for (uint8_t zone = 0; zone < 64; ++zone) {
+    if (zone) body += ',';
+    body += String(wideResults.target_status[zone]);
+  }
+  body += "]}";
   diagnosticServer.send(200, "application/json", body);
 }
 
@@ -266,11 +405,13 @@ void setup() {
   Serial.println("PSF Sensor Board v1.3 bring-up firmware");
   Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(400000);
-  initExpander();
   ledsReady = rmtInit(LED_PIN, RMT_TX_MODE, RMT_MEM_NUM_BLOCKS_1, 10000000);
   if (ledsReady) showLeds(); // all off at boot
   cameraReady = initCamera();
   connectWifi();
+  // The sensor rail can come up after the ESP32's I2C peripheral. Configure
+  // the expander only after Wi-Fi setup has given the board time to settle.
+  initExpander();
 
   cameraServer.on("/health", HTTP_GET, sendHealth);
   cameraServer.on("/capture", HTTP_GET, sendCapture);
@@ -278,7 +419,13 @@ void setup() {
   cameraServer.begin();
   xTaskCreatePinnedToCore(cameraTask, "camera-http", 8192, nullptr, 1, nullptr, 1);
 
+  // Keep the camera reachable while the wide sensor loads its firmware over
+  // I2C; this can take several seconds on the first initialization.
+  initTofSensors();
+
   diagnosticServer.on("/diagnostics", HTTP_GET, sendDiagnostics);
+  diagnosticServer.on("/ranges", HTTP_GET, sendRanges);
+  diagnosticServer.on("/wide-range", HTTP_GET, sendWideRange);
   diagnosticServer.on("/led", HTTP_GET, setLed);
   diagnosticServer.begin();
   Serial.printf("Camera port %u, diagnostics port %u\n", CAMERA_PORT, DIAGNOSTIC_PORT);
@@ -286,5 +433,12 @@ void setup() {
 
 void loop() {
   diagnosticServer.handleClient();
+  if (wideTofReady && millis() - wideLastPollAt >= 40) {
+    wideLastPollAt = millis();
+    if (wideTof.isDataReady() && wideTof.getRangingData(&wideResults)) {
+      wideHasFrame = true;
+      wideCapturedAt = millis();
+    }
+  }
   delay(2);
 }

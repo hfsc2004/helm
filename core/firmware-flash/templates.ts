@@ -30,6 +30,7 @@ export interface TemplateManifest {
   target: string;
   fqbn: string;
   core: string;
+  libraries?: Array<{ name: string; version: string }>;
   vehicleKind?: string;
   capabilities?: string[];
   vars: TemplateVar[];

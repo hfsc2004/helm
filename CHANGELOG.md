@@ -5,6 +5,25 @@ All notable changes to PSF Helm will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4] - 2026-09-25
+
+### Added
+- Read ICM-42607-C accelerometer, gyroscope, and temperature samples from the
+  PSF Sensor Board v1.3 through `/imu`; expose configuration readbacks for
+  intermittent I²C diagnosis.
+- Add stereo PDM microphone capture and GPIO/clock diagnostic endpoints. Audio
+  capture is still nonfunctional on the tested board: both channels returned
+  constant PCM with zero AC RMS. The independent 2.048 MHz clock test found no
+  driven data at the ESP32 GPIO14 pad; the physical cause remains unresolved.
+- Add `vehicle-speaker-play` to decode local audio with `ffmpeg` and stream
+  16 kHz stereo PCM to the board's 8 KiB buffered I²S playback queue.
+
+### Verified on hardware
+- Enabling the MAX98357A through TCA9534 P4 restored audible speaker playback
+  of the 100 KiB sample. All three ToF devices remained available after that
+  expander change. IMU samples changed with board orientation, although later
+  I²C reads were occasionally intermittent.
+
 ## [0.3.3] - 2026-09-25
 
 ### Added

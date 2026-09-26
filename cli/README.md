@@ -16,3 +16,19 @@ The agent-first command-line surface for PSF Helm. Subcommands are designed for 
 - `helm.ts` — entry point, argument parser, command dispatcher
 - `commands/` — one file per subcommand; each registers a `CommandDef` and an execute function
 - `output.ts` — JSON / NDJSON / pretty output helpers; stdout discipline
+
+## PSF Sensor Board v1.3 speaker
+
+With `ffmpeg` installed on the Helm computer, play a local audio file through
+the v1.3 board's speaker:
+
+```bash
+npm run helm -- vehicle-speaker-play <vehicle-id> <audio-file>
+```
+
+Helm decodes to 16 kHz signed 16-bit stereo PCM and streams it to the board's
+port-82 `/speaker-pcm` endpoint. The board buffers 8 KiB and applies
+backpressure; the entire audio file is not loaded into board memory. By
+default the command derives the host from the vehicle's camera URL; use
+`--base-url http://<board-ip>:82` if that address differs. The vehicle must be
+registered as Sensor Board v1.3. See the [firmware bench notes](../firmware/templates/sensor-board-v1-3-esp32s3/README.md).

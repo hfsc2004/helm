@@ -1,7 +1,7 @@
 // PSF Sensor Board v1.3 bench bring-up firmware.
 // Camera endpoints are on port 81; sensors and LED diagnostics are on port 82.
-// No motor endpoint is provided. IMU samples, microphones, speaker, IR
-// emitters, and UART telemetry are not reported until their drivers are tested.
+// No motor endpoint is provided. IR emitters and UART telemetry are not
+// reported until their drivers are tested.
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -9,6 +9,13 @@
 #include <ESPmDNS.h>
 #include <esp_camera.h>
 #include <esp32-hal-rmt.h>
+#include <esp32-hal-ledc.h>
+#include <ESP_I2S.h>
+#include <driver/gpio.h>
+#include <driver/i2s_pdm.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
 #include <VL53L1X.h>
 #include <Adafruit_VL53L5CX.h>
 
@@ -24,8 +31,24 @@ static const int JPEG_QUALITY = {{camera.jpegQuality}};
 static constexpr uint8_t I2C_SDA = 2;
 static constexpr uint8_t I2C_SCL = 1;
 static constexpr uint8_t TCA9534_ADDRESS = 0x20;
+static constexpr uint8_t SPEAKER_ENABLE_MASK = 0x10; // TCA9534 P4 -> MAX98357A SD_MODE#
 static constexpr uint8_t FRONT_TOF_ADDRESS = 0x30;
 static constexpr uint8_t REAR_TOF_ADDRESS = 0x31;
+static constexpr uint8_t IMU_ADDRESS = 0x68;
+static constexpr uint8_t IMU_WHO_AM_I = 0x61;
+static constexpr uint8_t MIC_PDM_CLK = 21;
+static constexpr uint8_t MIC_PDM_DATA = 14;
+static constexpr uint32_t MIC_SAMPLE_RATE = 16000;
+static constexpr uint32_t MIC_PDM_CLOCK_HZ = MIC_SAMPLE_RATE * 128;
+static constexpr uint8_t SPEAKER_DIN = 47;
+static constexpr uint8_t SPEAKER_BCLK = 41;
+static constexpr uint8_t SPEAKER_LRCLK = 42;
+static constexpr uint32_t SPEAKER_SAMPLE_RATE = 16000;
+static constexpr uint16_t SPEAKER_TONE_HZ = 660;
+static constexpr uint16_t SPEAKER_TONE_MS = 350;
+static constexpr int16_t SPEAKER_TONE_AMPLITUDE = 6000;
+static constexpr size_t SPEAKER_CHUNK_BYTES = 1024;
+static constexpr uint8_t SPEAKER_BUFFER_CHUNKS = 8;
 static constexpr uint8_t LED_PIN = 48;
 static constexpr uint8_t LED_COUNT = 3;
 static constexpr uint8_t CAMERA_PORT = 81;
@@ -47,11 +70,30 @@ bool ledsReady = false;
 bool frontTofReady = false;
 bool rearTofReady = false;
 bool wideTofReady = false;
+bool imuReady = false;
+bool microphonesReady = false;
+bool speakerReady = false;
+bool speakerAmpEnabled = false;
+int imuWhoAmI = -1;
 uint32_t bootMs = 0;
 uint8_t ledValues[LED_COUNT][4] = {};
 VL53L1X frontTof;
 VL53L1X rearTof;
 Adafruit_VL53L5CX wideTof;
+I2SClass microphoneI2s;
+I2SClass speakerI2s;
+struct SpeakerPcmChunk {
+  uint16_t size;
+  uint8_t data[SPEAKER_CHUNK_BYTES];
+};
+QueueHandle_t speakerQueue = nullptr;
+volatile uint32_t speakerPcmQueuedBytes = 0;
+volatile uint32_t speakerPcmPlayedBytes = 0;
+volatile bool speakerPcmStreaming = false;
+volatile bool speakerPcmUploadComplete = false;
+volatile bool speakerPcmUploadFailed = false;
+uint8_t speakerPcmPending[4] = {};
+uint8_t speakerPcmPendingSize = 0;
 VL53L5CX_ResultsData wideResults = {};
 bool wideHasFrame = false;
 uint32_t wideCapturedAt = 0;
@@ -78,29 +120,169 @@ bool readRegister8(uint8_t address, uint8_t reg, uint8_t *value) {
   return true;
 }
 
+bool writeRegister8(uint8_t address, uint8_t reg, uint8_t value) {
+  Wire.beginTransmission(address);
+  Wire.write(reg);
+  Wire.write(value);
+  return Wire.endTransmission() == 0;
+}
+
+bool readRegisters(uint8_t address, uint8_t reg, uint8_t *values, size_t count) {
+  Wire.beginTransmission(address);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom(address, count) != count) return false;
+  for (size_t i = 0; i < count; ++i) values[i] = Wire.read();
+  return true;
+}
+
+void initImu() {
+  uint8_t identity = 0;
+  if (!readRegister8(IMU_ADDRESS, 0x75, &identity)) return;
+  imuWhoAmI = identity;
+  if (identity != IMU_WHO_AM_I) return;
+  // ICM-42607-C: 100 Hz, +/-250 dps and +/-2 g, then enable both in LN mode.
+  // Configure scale/ODR before waking the sensors (PWR_MGMT0 = 0x0F).
+  if (!writeRegister8(IMU_ADDRESS, 0x20, 0x69) ||
+      !writeRegister8(IMU_ADDRESS, 0x21, 0x69) ||
+      !writeRegister8(IMU_ADDRESS, 0x1F, 0x0F)) return;
+  delay(50); // exceeds gyro startup time; do not write immediately after wake
+  uint8_t gyroConfig = 0, accelConfig = 0, power = 0;
+  imuReady = readRegister8(IMU_ADDRESS, 0x20, &gyroConfig) && gyroConfig == 0x69 &&
+    readRegister8(IMU_ADDRESS, 0x21, &accelConfig) && accelConfig == 0x69 &&
+    readRegister8(IMU_ADDRESS, 0x1F, &power) && power == 0x0F;
+  Serial.printf("IMU WHO_AM_I=0x%02X ready=%d\n", identity, imuReady);
+}
+
+void initMicrophones() {
+  // The two MSM261DHP006 parts share clock/data and have opposite L/R straps.
+  // GPIO21/GPIO14 follow the v1.3 schematic, not the older Rev A notes.
+  microphoneI2s.setPinsPdmRx(MIC_PDM_CLK, MIC_PDM_DATA);
+  microphoneI2s.setTimeout(1000);
+  microphonesReady = microphoneI2s.begin(I2S_MODE_PDM_RX, MIC_SAMPLE_RATE,
+    I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
+  if (!microphonesReady) {
+    Serial.println("PDM microphone I2S initialization failed");
+    return;
+  }
+  // Arduino's default 8S decimation drives 16 kHz * 64 = 1.024 MHz,
+  // between this microphone's specified low-power and normal clock ranges.
+  // 16S makes the clock 2.048 MHz while preserving 16 kHz PCM output.
+  i2s_chan_handle_t rx = microphoneI2s.rxChan();
+  i2s_pdm_rx_clk_config_t clockConfig = I2S_PDM_RX_CLK_DEFAULT_CONFIG(MIC_SAMPLE_RATE);
+  clockConfig.dn_sample_mode = I2S_PDM_DSR_16S;
+  const esp_err_t stopped = i2s_channel_disable(rx);
+  if (stopped != ESP_OK) {
+    microphonesReady = false;
+    Serial.printf("PDM clock reconfiguration stop failed: %s\n", esp_err_to_name(stopped));
+    return;
+  }
+  const esp_err_t configured = i2s_channel_reconfig_pdm_rx_clock(rx, &clockConfig);
+  const esp_err_t started = i2s_channel_enable(rx);
+  microphonesReady = configured == ESP_OK && started == ESP_OK;
+  Serial.printf("PDM microphones ready=%d clock=%lu Hz config=%s start=%s\n",
+    microphonesReady, static_cast<unsigned long>(MIC_PDM_CLOCK_HZ),
+    esp_err_to_name(configured), esp_err_to_name(started));
+}
+
+void speakerPlaybackTask(void *) {
+  SpeakerPcmChunk chunk;
+  bool started = false;
+  for (;;) {
+    if (!speakerPcmStreaming) {
+      started = false;
+      vTaskDelay(pdMS_TO_TICKS(1));
+      continue;
+    }
+    // Prime half the 8 KiB queue before starting. This gives short Wi-Fi
+    // pauses room to recover; a shorter file starts once its upload ends.
+    if (!started) {
+      if (uxQueueMessagesWaiting(speakerQueue) < SPEAKER_BUFFER_CHUNKS / 2 &&
+          !speakerPcmUploadComplete) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+        continue;
+      }
+      started = true;
+    }
+    if (xQueueReceive(speakerQueue, &chunk, pdMS_TO_TICKS(20)) == pdTRUE) {
+      if (speakerI2s.write(chunk.data, chunk.size) != chunk.size) {
+        speakerPcmUploadFailed = true;
+      }
+      speakerPcmPlayedBytes += chunk.size;
+    }
+    if (speakerPcmUploadComplete && speakerPcmPlayedBytes == speakerPcmQueuedBytes) {
+      speakerPcmStreaming = false;
+    }
+  }
+}
+
+void initSpeaker() {
+  // MAX98357A on Rev 1.3: GPIO47 DIN, GPIO41 BCLK, GPIO42 LRCLK.
+  // Mono amplifier slot selection is a board strap; send the same PCM to
+  // both I2S slots so the test does not depend on that strap.
+  speakerI2s.setPins(SPEAKER_BCLK, SPEAKER_LRCLK, SPEAKER_DIN);
+  speakerI2s.setTimeout(1000);
+  speakerReady = speakerI2s.begin(I2S_MODE_STD, SPEAKER_SAMPLE_RATE,
+    I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH);
+  if (speakerReady) {
+    speakerQueue = xQueueCreate(SPEAKER_BUFFER_CHUNKS, sizeof(SpeakerPcmChunk));
+    speakerReady = speakerQueue != nullptr &&
+      xTaskCreate(speakerPlaybackTask, "speaker-tx", 4096, nullptr, 2, nullptr) == pdPASS;
+    if (!speakerReady && speakerQueue) {
+      vQueueDelete(speakerQueue);
+      speakerQueue = nullptr;
+    }
+  }
+  Serial.printf("MAX98357A I2S ready=%d\n", speakerReady);
+}
+
 void initExpander() {
   expanderReady = false;
+  speakerAmpEnabled = false;
   if (!i2cPresent(TCA9534_ADDRESS)) return;
   // Hold all ToFs in reset while assigning distinct addresses to the two
   // VL53L1CB devices. P3 high also held the wide VL53L5CX off on the bench.
-  // P4-P7 stay inputs until the remaining board-control nets are verified.
-  const bool outputSet = writeExpander(0x01, 0x08);
-  const bool directionSet = writeExpander(0x03, 0xF0);
-  uint8_t output = 0, direction = 0;
-  const bool outputVerified = readRegister8(TCA9534_ADDRESS, 0x01, &output) && output == 0x08;
-  const bool directionVerified = readRegister8(TCA9534_ADDRESS, 0x03, &direction) && direction == 0xF0;
-  expanderReady = outputSet && directionSet && outputVerified && directionVerified;
+  // P4 drives the MAX98357A SD_MODE# input: output-high enables the amp.
+  // P5-P7 remain inputs until their board-control nets are verified.
+  for (uint8_t attempt = 0; attempt < 5 && !expanderReady; ++attempt) {
+    const bool outputSet = writeExpander(0x01, 0x08 | SPEAKER_ENABLE_MASK);
+    const bool directionSet = writeExpander(0x03, 0xE0);
+    uint8_t output = 0, direction = 0, input = 0;
+    const bool outputVerified = readRegister8(TCA9534_ADDRESS, 0x01, &output) &&
+      output == (0x08 | SPEAKER_ENABLE_MASK);
+    const bool directionVerified = readRegister8(TCA9534_ADDRESS, 0x03, &direction) &&
+      direction == 0xE0;
+    const bool pinVerified = readRegister8(TCA9534_ADDRESS, 0x00, &input) &&
+      (input & SPEAKER_ENABLE_MASK) != 0;
+    speakerAmpEnabled = outputVerified && directionVerified && pinVerified;
+    expanderReady = outputSet && directionSet && speakerAmpEnabled;
+    if (!expanderReady) delay(50);
+  }
+}
+
+bool ensureSpeakerAmpEnabled() {
+  // A late I2C response should not require restarting the ToF sensors.
+  // Preserve every other expander bit while driving P4 high.
+  speakerAmpEnabled = false;
+  uint8_t output = 0, direction = 0, input = 0;
+  if (!readRegister8(TCA9534_ADDRESS, 0x01, &output) ||
+      !readRegister8(TCA9534_ADDRESS, 0x03, &direction)) return false;
+  if (!writeExpander(0x01, output | SPEAKER_ENABLE_MASK) ||
+      !writeExpander(0x03, direction & ~SPEAKER_ENABLE_MASK)) return false;
+  speakerAmpEnabled = readRegister8(TCA9534_ADDRESS, 0x00, &input) &&
+    (input & SPEAKER_ENABLE_MASK) != 0;
+  return speakerAmpEnabled;
 }
 
 bool initNarrowTof(VL53L1X &sensor, uint8_t pinMask,
                    uint8_t address, uint8_t *activePins) {
-  const uint8_t enabled = 0x08 | *activePins | pinMask;
+  const uint8_t enabled = 0x08 | SPEAKER_ENABLE_MASK | *activePins | pinMask;
   if (!writeExpander(0x01, enabled)) return false;
   delay(20);
   sensor.setBus(&Wire);
   sensor.setTimeout(500);
   if (!sensor.init()) {
-    writeExpander(0x01, 0x08 | *activePins);
+    writeExpander(0x01, 0x08 | SPEAKER_ENABLE_MASK | *activePins);
     return false;
   }
   sensor.setAddress(address);
@@ -108,7 +290,7 @@ bool initNarrowTof(VL53L1X &sensor, uint8_t pinMask,
   if (!i2cPresent(address) ||
       !sensor.setDistanceMode(VL53L1X::Short) ||
       !sensor.setMeasurementTimingBudget(50000)) {
-    writeExpander(0x01, 0x08 | *activePins);
+    writeExpander(0x01, 0x08 | SPEAKER_ENABLE_MASK | *activePins);
     return false;
   }
   *activePins |= pinMask;
@@ -123,7 +305,7 @@ void initTofSensors() {
 
   // The wide sensor retains the default address while the two narrow parts
   // stay powered at 0x30/0x31. P2 high + P3 low was confirmed on the bench.
-  if (!writeExpander(0x01, activePins | 0x04)) return;
+  if (!writeExpander(0x01, SPEAKER_ENABLE_MASK | activePins | 0x04)) return;
   delay(100);
   if (!i2cPresent(0x29)) return;
   wideTofReady = wideTof.begin(0x29, &Wire, 400000) &&
@@ -204,12 +386,16 @@ void connectWifi() {
 
 void sendHealth() {
   String body = "{\"ok\":true,\"board\":\"psf-sensor-board\",\"revision\":\"1.3\"";
-  body += ",\"firmware\":\"bring-up-2\",\"uptimeMs\":" + String(millis() - bootMs);
+  body += ",\"firmware\":\"bring-up-10\",\"uptimeMs\":" + String(millis() - bootMs);
   body += ",\"cameraReady\":" + String(cameraReady ? "true" : "false");
   body += ",\"expanderReady\":" + String(expanderReady ? "true" : "false");
   body += ",\"frontTofReady\":" + String(frontTofReady ? "true" : "false");
   body += ",\"rearTofReady\":" + String(rearTofReady ? "true" : "false");
   body += ",\"wideTofReady\":" + String(wideTofReady ? "true" : "false");
+  body += ",\"imuReady\":" + String(imuReady ? "true" : "false");
+  body += ",\"microphonesReady\":" + String(microphonesReady ? "true" : "false");
+  body += ",\"speakerReady\":" + String(speakerReady ? "true" : "false");
+  body += ",\"speakerAmpEnabled\":" + String(speakerAmpEnabled ? "true" : "false");
   body += ",\"ledsReady\":" + String(ledsReady ? "true" : "false");
   body += ",\"rssi\":" + String(WiFi.RSSI()) + "}";
   cameraServer.send(200, "application/json", body);
@@ -291,16 +477,30 @@ void sendDiagnostics() {
     first = false;
   }
   body += "]";
-  uint8_t expanderOutput = 0, expanderConfig = 0;
+  uint8_t expanderInput = 0, expanderOutput = 0, expanderConfig = 0;
+  const bool inputReadable = readRegister8(TCA9534_ADDRESS, 0x00, &expanderInput);
   const bool outputReadable = readRegister8(TCA9534_ADDRESS, 0x01, &expanderOutput);
   const bool configReadable = readRegister8(TCA9534_ADDRESS, 0x03, &expanderConfig);
   body += ",\"expanderPresent\":" + String(i2cPresent(TCA9534_ADDRESS) ? "true" : "false");
+  body += ",\"expanderInput\":" + String(inputReadable ? String(expanderInput) : "null");
   body += ",\"expanderOutput\":" + String(outputReadable ? String(expanderOutput) : "null");
   body += ",\"expanderConfig\":" + String(configReadable ? String(expanderConfig) : "null");
   body += ",\"expanderReady\":" + String(expanderReady ? "true" : "false");
   body += ",\"frontTofReady\":" + String(frontTofReady ? "true" : "false");
   body += ",\"rearTofReady\":" + String(rearTofReady ? "true" : "false");
   body += ",\"wideTofReady\":" + String(wideTofReady ? "true" : "false");
+  body += ",\"imuReady\":" + String(imuReady ? "true" : "false");
+  body += ",\"microphonesReady\":" + String(microphonesReady ? "true" : "false");
+  body += ",\"speakerReady\":" + String(speakerReady ? "true" : "false");
+  body += ",\"speakerAmpEnabled\":" + String(speakerAmpEnabled ? "true" : "false");
+  body += ",\"imuWhoAmI\":" + String(imuWhoAmI);
+  uint8_t imuGyroConfig = 0, imuAccelConfig = 0, imuPower = 0;
+  const bool imuGyroReadable = readRegister8(IMU_ADDRESS, 0x20, &imuGyroConfig);
+  const bool imuAccelReadable = readRegister8(IMU_ADDRESS, 0x21, &imuAccelConfig);
+  const bool imuPowerReadable = readRegister8(IMU_ADDRESS, 0x1F, &imuPower);
+  body += ",\"imuGyroConfig\":" + String(imuGyroReadable ? String(imuGyroConfig) : "null");
+  body += ",\"imuAccelConfig\":" + String(imuAccelReadable ? String(imuAccelConfig) : "null");
+  body += ",\"imuPower\":" + String(imuPowerReadable ? String(imuPower) : "null");
   body += ",\"frontAddressResponds\":" + String(i2cPresent(FRONT_TOF_ADDRESS) ? "true" : "false");
   body += ",\"rearAddressResponds\":" + String(i2cPresent(REAR_TOF_ADDRESS) ? "true" : "false");
   body += ",\"tofDefaultAddressResponds\":" + String(i2cPresent(0x29) ? "true" : "false");
@@ -367,6 +567,399 @@ void sendWideRange() {
   diagnosticServer.send(200, "application/json", body);
 }
 
+int16_t signedImuWord(const uint8_t *bytes) {
+  return static_cast<int16_t>((static_cast<uint16_t>(bytes[0]) << 8) | bytes[1]);
+}
+
+void sendImu() {
+  // A busy shared I2C bus can make the boot-time configuration check fail.
+  // Allow a fresh initialization when an IMU sample is explicitly requested.
+  if (!imuReady) initImu();
+  if (!imuReady) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"IMU unavailable\"}");
+    return;
+  }
+  // One burst reads temperature, acceleration and angular rate together.
+  uint8_t data[14];
+  if (!readRegisters(IMU_ADDRESS, 0x09, data, sizeof(data))) {
+    diagnosticServer.send(502, "application/json", "{\"ok\":false,\"error\":\"IMU read failed\"}");
+    return;
+  }
+  const int16_t temperature = signedImuWord(data);
+  int16_t accel[3], gyro[3];
+  for (uint8_t axis = 0; axis < 3; ++axis) {
+    accel[axis] = signedImuWord(data + 2 + axis * 2);
+    gyro[axis] = signedImuWord(data + 8 + axis * 2);
+  }
+  String body = "{\"ok\":true,\"sampledAtMs\":" + String(millis());
+  body += ",\"frame\":\"chip\",\"rawAccel\":[";
+  for (uint8_t axis = 0; axis < 3; ++axis) {
+    if (axis) body += ',';
+    body += String(accel[axis]);
+  }
+  body += "],\"accelG\":[";
+  for (uint8_t axis = 0; axis < 3; ++axis) {
+    if (axis) body += ',';
+    body += String(accel[axis] / 16384.0f, 4);
+  }
+  body += "],\"rawGyro\":[";
+  for (uint8_t axis = 0; axis < 3; ++axis) {
+    if (axis) body += ',';
+    body += String(gyro[axis]);
+  }
+  body += "],\"gyroDps\":[";
+  for (uint8_t axis = 0; axis < 3; ++axis) {
+    if (axis) body += ',';
+    body += String(gyro[axis] / 131.0f, 4);
+  }
+  body += "],\"rawTemperature\":" + String(temperature);
+  body += ",\"temperatureC\":" + String(25.0f + temperature / 128.0f, 2) + '}';
+  diagnosticServer.send(200, "application/json", body);
+}
+
+void sendMicrophoneLevels() {
+  if (!microphonesReady) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"microphones unavailable\"}");
+    return;
+  }
+  // 2048 stereo frames: enough for a short level check without a live stream.
+  int16_t samples[512 * 2];
+  int64_t sum[2] = {}, sumSquares[2] = {};
+  uint32_t peak[2] = {};
+  uint32_t frames = 0;
+  for (uint8_t block = 0; block < 4; ++block) {
+    const size_t bytes = microphoneI2s.readBytes(reinterpret_cast<char *>(samples), sizeof(samples));
+    if (bytes != sizeof(samples)) {
+      diagnosticServer.send(502, "application/json", "{\"ok\":false,\"error\":\"PDM capture failed\"}");
+      return;
+    }
+    for (size_t frame = 0; frame < 512; ++frame) {
+      for (uint8_t channel = 0; channel < 2; ++channel) {
+        const int32_t value = samples[frame * 2 + channel];
+        sum[channel] += value;
+        sumSquares[channel] += static_cast<int64_t>(value) * value;
+        peak[channel] = max(peak[channel], static_cast<uint32_t>(abs(value)));
+      }
+    }
+    frames += 512;
+  }
+  String body = "{\"ok\":true,\"sampleRate\":" + String(MIC_SAMPLE_RATE);
+  body += ",\"configuredPdmClockHz\":" + String(MIC_PDM_CLOCK_HZ);
+  body += ",\"frames\":" + String(frames) + ",\"channels\":[";
+  for (uint8_t channel = 0; channel < 2; ++channel) {
+    if (channel) body += ',';
+    const double mean = static_cast<double>(sum[channel]) / frames;
+    const double variance = max(0.0, static_cast<double>(sumSquares[channel]) / frames - mean * mean);
+    body += "{\"channel\":" + String(channel);
+    body += ",\"mean\":" + String(mean, 2);
+    body += ",\"rms\":" + String(sqrt(variance), 2);
+    body += ",\"peak\":" + String(peak[channel]) + '}';
+  }
+  body += "]}";
+  diagnosticServer.send(200, "application/json", body);
+}
+
+void sendMicrophonePinTest() {
+  // Bench-only electrical clue: sample the GPIO pad while I2S owns it.
+  // Vary the interval so a periodic PDM clock is less likely to alias.
+  gpio_input_enable(static_cast<gpio_num_t>(MIC_PDM_CLK));
+  gpio_input_enable(static_cast<gpio_num_t>(MIC_PDM_DATA));
+  uint32_t clockHigh = 0, dataHigh = 0;
+  for (uint32_t sample = 0; sample < 10000; ++sample) {
+    clockHigh += gpio_get_level(static_cast<gpio_num_t>(MIC_PDM_CLK));
+    dataHigh += gpio_get_level(static_cast<gpio_num_t>(MIC_PDM_DATA));
+    delayMicroseconds(sample % 7 + 1);
+  }
+  String body = "{\"ok\":true,\"samples\":10000,\"clockPin\":" + String(MIC_PDM_CLK);
+  body += ",\"clockHigh\":" + String(clockHigh) + ",\"dataPin\":" + String(MIC_PDM_DATA);
+  body += ",\"dataHigh\":" + String(dataHigh) + '}';
+  diagnosticServer.send(200, "application/json", body);
+}
+
+void sendMicrophoneLivePullTest() {
+  if (!microphonesReady) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"microphone I2S unavailable\"}");
+    return;
+  }
+  // Leave the PDM receiver and clock running. A weak internal pull-up can
+  // reveal a floating DATA net without driving against a microphone output.
+  const gpio_num_t dataPin = static_cast<gpio_num_t>(MIC_PDM_DATA);
+  gpio_input_enable(dataPin);
+  uint32_t beforeHigh = 0, pulledHigh = 0, restoredHigh = 0;
+  for (uint16_t sample = 0; sample < 1000; ++sample) {
+    beforeHigh += gpio_get_level(dataPin);
+    delayMicroseconds(sample % 7 + 1);
+  }
+  const esp_err_t enabled = gpio_pullup_en(dataPin);
+  if (enabled != ESP_OK) {
+    diagnosticServer.send(500, "application/json", "{\"ok\":false,\"error\":\"could not enable DATA pull-up\"}");
+    return;
+  }
+  delay(5);
+  for (uint32_t sample = 0; sample < 10000; ++sample) {
+    pulledHigh += gpio_get_level(dataPin);
+    delayMicroseconds(sample % 7 + 1);
+  }
+  const esp_err_t disabled = gpio_pullup_dis(dataPin);
+  delay(5);
+  for (uint16_t sample = 0; sample < 1000; ++sample) {
+    restoredHigh += gpio_get_level(dataPin);
+    delayMicroseconds(sample % 7 + 1);
+  }
+  String body = "{\"ok\":" + String(disabled == ESP_OK ? "true" : "false");
+  body += ",\"dataPin\":" + String(MIC_PDM_DATA);
+  body += ",\"beforeHighOf1000\":" + String(beforeHigh);
+  body += ",\"pulledHighOf10000\":" + String(pulledHigh);
+  body += ",\"restoredHighOf1000\":" + String(restoredHigh);
+  body += ",\"pullupRemoved\":" + String(disabled == ESP_OK ? "true" : "false") + '}';
+  diagnosticServer.send(disabled == ESP_OK ? 200 : 500, "application/json", body);
+}
+
+void sendMicrophoneLineTest() {
+  if (!microphonesReady) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"microphone I2S unavailable\"}");
+    return;
+  }
+  // Release GPIO14 from I2S before testing its pad with only weak internal
+  // pulls. Neither microphone is clocked during these measurements.
+  if (!microphoneI2s.end()) {
+    microphonesReady = false;
+    diagnosticServer.send(500, "application/json", "{\"ok\":false,\"error\":\"could not stop microphone I2S\"}");
+    return;
+  }
+  microphonesReady = false;
+  pinMode(MIC_PDM_DATA, INPUT_PULLUP);
+  delay(25);
+  uint32_t pullupHigh = 0;
+  for (uint16_t sample = 0; sample < 1000; ++sample) {
+    pullupHigh += digitalRead(MIC_PDM_DATA);
+    delayMicroseconds(10);
+  }
+  pinMode(MIC_PDM_DATA, INPUT_PULLDOWN);
+  delay(25);
+  uint32_t pulldownHigh = 0;
+  for (uint16_t sample = 0; sample < 1000; ++sample) {
+    pulldownHigh += digitalRead(MIC_PDM_DATA);
+    delayMicroseconds(10);
+  }
+  pinMode(MIC_PDM_DATA, INPUT);
+  initMicrophones();
+  if (microphonesReady) delay(25); // allow the microphones to wake after clock resumes
+  String body = "{\"ok\":" + String(microphonesReady ? "true" : "false");
+  body += ",\"samples\":1000,\"dataPin\":" + String(MIC_PDM_DATA);
+  body += ",\"pullupHigh\":" + String(pullupHigh);
+  body += ",\"pulldownHigh\":" + String(pulldownHigh);
+  body += ",\"captureRestored\":" + String(microphonesReady ? "true" : "false") + '}';
+  diagnosticServer.send(microphonesReady ? 200 : 500, "application/json", body);
+}
+
+void sendMicrophoneRawClockTest() {
+  if (!microphonesReady) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"microphone I2S unavailable\"}");
+    return;
+  }
+  // Isolate microphone output from the I2S PDM receiver. Release both pins,
+  // drive CLK with an independent LEDC timer, then read DATA as a plain GPIO.
+  if (!microphoneI2s.end()) {
+    microphonesReady = false;
+    diagnosticServer.send(500, "application/json", "{\"ok\":false,\"error\":\"could not stop microphone I2S\"}");
+    return;
+  }
+  microphonesReady = false;
+  const gpio_num_t clockPin = static_cast<gpio_num_t>(MIC_PDM_CLK);
+  const gpio_num_t dataPin = static_cast<gpio_num_t>(MIC_PDM_DATA);
+  pinMode(MIC_PDM_DATA, INPUT);
+  gpio_pullup_dis(dataPin);
+  gpio_pulldown_dis(dataPin);
+  const bool attached = ledcAttachChannel(MIC_PDM_CLK, MIC_PDM_CLOCK_HZ, 1, 7);
+  const bool running = attached && ledcWrite(MIC_PDM_CLK, 1); // 1/2 = 50% duty
+  const uint32_t actualClockHz = running ? ledcReadFreq(MIC_PDM_CLK) : 0;
+  uint32_t clockHigh = 0, dataHigh = 0, dataTransitions = 0, pulledHigh = 0;
+  if (running) {
+    delay(30); // microphone wake-up maximum is 20 ms
+    gpio_input_enable(clockPin);
+    uint8_t previous = gpio_get_level(dataPin);
+    for (uint32_t sample = 0; sample < 10000; ++sample) {
+      clockHigh += gpio_get_level(clockPin);
+      const uint8_t value = gpio_get_level(dataPin);
+      dataHigh += value;
+      dataTransitions += value != previous;
+      previous = value;
+      delayMicroseconds(sample % 7 + 1);
+    }
+    gpio_pullup_en(dataPin); // weak pull distinguishes a floating DATA net
+    delay(5);
+    for (uint32_t sample = 0; sample < 10000; ++sample) {
+      pulledHigh += gpio_get_level(dataPin);
+      delayMicroseconds(sample % 7 + 1);
+    }
+    gpio_pullup_dis(dataPin);
+  }
+  if (attached) ledcDetach(MIC_PDM_CLK);
+  pinMode(MIC_PDM_CLK, INPUT);
+  pinMode(MIC_PDM_DATA, INPUT);
+  initMicrophones();
+  String body = "{\"ok\":" + String(running && microphonesReady ? "true" : "false");
+  body += ",\"independentClockHz\":" + String(actualClockHz);
+  body += ",\"samples\":10000,\"clockHigh\":" + String(clockHigh);
+  body += ",\"dataHighNoPull\":" + String(dataHigh);
+  body += ",\"dataTransitionsNoPull\":" + String(dataTransitions);
+  body += ",\"dataHighWeakPullup\":" + String(pulledHigh);
+  body += ",\"pdmCaptureRestored\":" + String(microphonesReady ? "true" : "false") + '}';
+  diagnosticServer.send(running && microphonesReady ? 200 : 500, "application/json", body);
+}
+
+void sendMicrophoneWav() {
+  if (!microphonesReady) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"microphones unavailable\"}");
+    return;
+  }
+  // Explicit one-second capture; no always-on network audio stream.
+  size_t bytes = 0;
+  uint8_t *wav = microphoneI2s.recordWAV(1, &bytes);
+  if (!wav || !bytes) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"WAV capture failed\"}");
+    return;
+  }
+  WiFiClient client = diagnosticServer.client();
+  client.printf("HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: %u\r\nCache-Control: no-store\r\n\r\n",
+                static_cast<unsigned>(bytes));
+  size_t written = 0;
+  while (written < bytes && client.connected()) {
+    const size_t chunk = min(static_cast<size_t>(1024), bytes - written);
+    const size_t sent = client.write(wav + written, chunk);
+    if (!sent) break;
+    written += sent;
+  }
+  free(wav);
+}
+
+void sendSpeakerTest() {
+  if (!speakerReady || speakerPcmStreaming) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"speaker I2S unavailable\"}");
+    return;
+  }
+  if (!ensureSpeakerAmpEnabled()) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"speaker amplifier P4 enable failed\"}");
+    return;
+  }
+  if (!speakerI2s.configureTX(SPEAKER_SAMPLE_RATE, I2S_DATA_BIT_WIDTH_16BIT,
+                              I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH)) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"speaker sample rate unavailable\"}");
+    return;
+  }
+  static constexpr uint16_t BLOCK_FRAMES = 256;
+  static constexpr uint32_t TOTAL_FRAMES = SPEAKER_SAMPLE_RATE * SPEAKER_TONE_MS / 1000;
+  static constexpr uint16_t FADE_FRAMES = SPEAKER_SAMPLE_RATE / 100;
+  int16_t samples[BLOCK_FRAMES * 2];
+  float phase = 0.0f;
+  const float phaseStep = 2.0f * PI * SPEAKER_TONE_HZ / SPEAKER_SAMPLE_RATE;
+  for (uint32_t start = 0; start < TOTAL_FRAMES; start += BLOCK_FRAMES) {
+    const uint16_t frames = min(static_cast<uint32_t>(BLOCK_FRAMES), TOTAL_FRAMES - start);
+    for (uint16_t i = 0; i < frames; ++i) {
+      const uint32_t frame = start + i;
+      float envelope = 1.0f;
+      if (frame < FADE_FRAMES) envelope = static_cast<float>(frame) / FADE_FRAMES;
+      else if (TOTAL_FRAMES - frame < FADE_FRAMES)
+        envelope = static_cast<float>(TOTAL_FRAMES - frame) / FADE_FRAMES;
+      const int16_t value = static_cast<int16_t>(SPEAKER_TONE_AMPLITUDE * envelope * sinf(phase));
+      samples[2 * i] = value;
+      samples[2 * i + 1] = value;
+      phase += phaseStep;
+      if (phase >= 2.0f * PI) phase -= 2.0f * PI;
+    }
+    const size_t bytes = frames * 2 * sizeof(int16_t);
+    if (speakerI2s.write(reinterpret_cast<const uint8_t *>(samples), bytes) != bytes) {
+      diagnosticServer.send(502, "application/json", "{\"ok\":false,\"error\":\"speaker I2S write failed\"}");
+      return;
+    }
+  }
+  diagnosticServer.send(200, "application/json",
+    "{\"ok\":true,\"frequencyHz\":" + String(SPEAKER_TONE_HZ) +
+    ",\"durationMs\":" + String(SPEAKER_TONE_MS) + "}");
+}
+
+bool queueSpeakerPcm(const uint8_t *data, size_t bytes) {
+  while (bytes) {
+    SpeakerPcmChunk chunk;
+    chunk.size = min(bytes, SPEAKER_CHUNK_BYTES);
+    memcpy(chunk.data, data, chunk.size);
+    if (xQueueSend(speakerQueue, &chunk, pdMS_TO_TICKS(2000)) != pdTRUE) return false;
+    speakerPcmQueuedBytes += chunk.size;
+    data += chunk.size;
+    bytes -= chunk.size;
+  }
+  return true;
+}
+
+void receiveSpeakerPcm() {
+  HTTPUpload &upload = diagnosticServer.upload();
+  if (upload.status == UPLOAD_FILE_START) {
+    if (speakerPcmStreaming) {
+      speakerPcmUploadFailed = true;
+      return;
+    }
+    speakerPcmQueuedBytes = 0;
+    speakerPcmPlayedBytes = 0;
+    speakerPcmPendingSize = 0;
+    speakerPcmUploadComplete = false;
+    speakerPcmUploadFailed = !speakerReady || !ensureSpeakerAmpEnabled() || !speakerI2s.configureTX(
+      SPEAKER_SAMPLE_RATE, I2S_DATA_BIT_WIDTH_16BIT,
+      I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH);
+    if (!speakerPcmUploadFailed) speakerPcmStreaming = true;
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (speakerPcmUploadFailed) return;
+    const uint8_t *data = upload.buf;
+    size_t remaining = upload.currentSize;
+    if (speakerPcmPendingSize) {
+      while (speakerPcmPendingSize < 4 && remaining) {
+        speakerPcmPending[speakerPcmPendingSize++] = *data++;
+        --remaining;
+      }
+      if (speakerPcmPendingSize == 4) {
+        if (!queueSpeakerPcm(speakerPcmPending, 4)) speakerPcmUploadFailed = true;
+        speakerPcmPendingSize = 0;
+      }
+    }
+    const size_t aligned = remaining & ~static_cast<size_t>(3);
+    if (!speakerPcmUploadFailed && aligned) {
+      if (!queueSpeakerPcm(data, aligned)) speakerPcmUploadFailed = true;
+    }
+    data += aligned;
+    remaining -= aligned;
+    while (remaining) {
+      speakerPcmPending[speakerPcmPendingSize++] = *data++;
+      --remaining;
+    }
+  } else if (upload.status == UPLOAD_FILE_END) {
+    speakerPcmUploadComplete = true;
+  } else if (upload.status == UPLOAD_FILE_ABORTED) {
+    speakerPcmUploadFailed = true;
+    speakerPcmUploadComplete = true;
+  }
+}
+
+void sendSpeakerPcm() {
+  if (!speakerReady) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"speaker I2S unavailable\"}");
+    return;
+  }
+  if (!speakerAmpEnabled) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"speaker amplifier P4 enable failed\"}");
+    return;
+  }
+  speakerPcmUploadComplete = true;
+  const uint32_t deadline = millis() + 5000;
+  while (speakerPcmStreaming && millis() < deadline) delay(1);
+  if (speakerPcmStreaming || speakerPcmUploadFailed || speakerPcmPendingSize || !speakerPcmQueuedBytes) {
+    diagnosticServer.send(400, "application/json", "{\"ok\":false,\"error\":\"PCM missing, unaligned, or I2S write failed\"}");
+    return;
+  }
+  diagnosticServer.send(200, "application/json",
+    "{\"ok\":true,\"bytes\":" + String(speakerPcmPlayedBytes) +
+    ",\"boardBufferBytes\":" + String(SPEAKER_BUFFER_CHUNKS * SPEAKER_CHUNK_BYTES) + "}");
+}
+
 bool parseByteArg(const char *name, uint8_t *out) {
   if (!diagnosticServer.hasArg(name)) return false;
   const String value = diagnosticServer.arg(name);
@@ -422,10 +1015,22 @@ void setup() {
   // Keep the camera reachable while the wide sensor loads its firmware over
   // I2C; this can take several seconds on the first initialization.
   initTofSensors();
+  initImu();
+  initMicrophones();
+  initSpeaker();
 
   diagnosticServer.on("/diagnostics", HTTP_GET, sendDiagnostics);
   diagnosticServer.on("/ranges", HTTP_GET, sendRanges);
   diagnosticServer.on("/wide-range", HTTP_GET, sendWideRange);
+  diagnosticServer.on("/imu", HTTP_GET, sendImu);
+  diagnosticServer.on("/mic-levels", HTTP_GET, sendMicrophoneLevels);
+  diagnosticServer.on("/mic-pin-test", HTTP_GET, sendMicrophonePinTest);
+  diagnosticServer.on("/mic-live-pull-test", HTTP_GET, sendMicrophoneLivePullTest);
+  diagnosticServer.on("/mic-line-test", HTTP_GET, sendMicrophoneLineTest);
+  diagnosticServer.on("/mic-raw-clock-test", HTTP_GET, sendMicrophoneRawClockTest);
+  diagnosticServer.on("/mic-capture.wav", HTTP_GET, sendMicrophoneWav);
+  diagnosticServer.on("/speaker-test", HTTP_POST, sendSpeakerTest);
+  diagnosticServer.on("/speaker-pcm", HTTP_POST, sendSpeakerPcm, receiveSpeakerPcm);
   diagnosticServer.on("/led", HTTP_GET, setLed);
   diagnosticServer.begin();
   Serial.printf("Camera port %u, diagnostics port %u\n", CAMERA_PORT, DIAGNOSTIC_PORT);

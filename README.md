@@ -434,10 +434,12 @@ If the button is greyed out, a yellow `!` chip next to it names the missing fiel
 
 The v1.3 bring-up image uses `esp32:esp32:esp32s3:PSRAM=opi`; a compile line
 showing `esp32:esp32:esp32` means the classic ESP32 template was selected.
-Its camera runs on port 81 and bench diagnostics/LED tests on port 82. The
-ToF, IMU, microphones, speaker, and IR emitters are **not yet functional** in
-this first image. See the [template notes](firmware/templates/sensor-board-v1-3-esp32s3/README.md)
-before treating it as a working sensor or collision-avoidance system.
+Its camera runs on port 81 and bench diagnostics, ToF/IMU readings, LED tests,
+and speaker playback run on port 82. All three ToF devices, the IMU, RGBW LEDs,
+and speaker have produced live bench results. The microphones remain diagnostic
+only (no usable captured audio), and IR emitter control and collision rules are
+not implemented. See the [template notes](firmware/templates/sensor-board-v1-3-esp32s3/README.md)
+for limits and test endpoints; raw ToF ranges are not collision decisions.
 
 The v1.3 bring-up board is a **single-board camera/sensor vehicle**, not a
 sidecar requiring a second drive ESP32. Helm does not show motor controls or
@@ -510,7 +512,7 @@ Both are vision-capable (the agent will eventually be able to see the camera fee
 | ESP32 skid-steer ground robot (HTTP/WiFi) | Driving end-to-end |
 | Drive board with **4× Sharp IR distance sensors + collision guard** (front L/C/R + rear) | In production firmware |
 | ESP32-S3 camera sidecar (PSF-original streamer; 3 pin profiles) | Flash-ready, live MJPEG into Drive view |
-| PSF Sensor Board v1.3 (ESP32-S3-CAM) | Single-board camera bring-up tested over Wi-Fi; ToF/IMU/audio still unimplemented, I²C devices not yet detected on the bench |
+| PSF Sensor Board v1.3 (ESP32-S3-CAM) | Single-board camera plus bench-tested ToF, IMU, RGBW and speaker; microphones still diagnostic-only, no motor/collision control |
 | Dual-board truck (drive ESP32 + ESP32-S3 video, separate IPs, mDNS) | Driving end-to-end |
 | Roving microphone sidecar | Vehicle streams I2S mic to host, host-side playback |
 | ESP32-S3 + Pico 2 quadcopter (with SNN/STDP flight control) | Planned |
@@ -541,7 +543,7 @@ Working end-to-end on Linux x64:
 - ✅ Drive an ESP32 skid-steer truck over WiFi (CLI and UI)
 - ✅ **Dual-board vehicles**: separate drive ESP32 + ESP32-S3 camera-and-video board, each with its own IP, Wi-Fi credentials, static-IP block, and flash params — mirrors the PSF Core Relay "Gateway Card" shape
 - ✅ **Configure-and-flash from the UI**: click a detected board → pick a template → fill in Wi-Fi / camera params → flash with live arduino-cli output
-- ✅ **PSF Sensor Board revision setting** per vehicle (v1.1 or v1.3) and v1.3 ESP32-S3-CAM bench bring-up template; front/rear ToF ranging and raw 8×8 depth frames are hardware-validated, while audio, IMU samples, and collision-control integration remain follow-up work
+- ✅ **PSF Sensor Board revision setting** per vehicle (v1.1 or v1.3) and v1.3 ESP32-S3-CAM bench bring-up template; front/rear ToF ranging, raw 8×8 depth frames, IMU samples, RGBW LEDs, and speaker playback have been hardware-tested. Microphone audio and collision-control integration remain follow-up work
 - ✅ **mDNS discovery** — drive boards advertise as `<name>.local` so DHCP IP changes don't break the connection; the host-side HTTP layer translates `ENOTFOUND` on `.local` names into "install Avahi (Linux) or Bonjour (Windows)" instead of a raw DNS error
 - ✅ **Host-side Wi-Fi scan** in the flash wizard — SSID dropdown lists networks the host sees (Linux/`nmcli` today, macOS/Windows fall back to text input), filtered to the bands the target board's radio can actually join (no 5GHz networks offered for an ESP32)
 - ✅ **Flash wizard polish** — yellow `!` chip names the missing field instead of silently disabling the Flash button; password reveal eye-icon so the user can verify a Wi-Fi typo *before* it gets baked into firmware; re-flashing the same robot updates the existing registry entry instead of erroring with "vehicle already exists"

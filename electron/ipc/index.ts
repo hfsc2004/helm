@@ -11,6 +11,8 @@ import type {
   FlashTemplateSummary,
   StateStreamEvent,
   StateStreamRequest,
+  SensorBoardSnapshotRequest,
+  SensorBoardSnapshotResponse,
   VehicleAddRequest,
   VehicleCmdRequest,
   VehicleRemoveRequest,
@@ -296,6 +298,37 @@ export function registerIpcHandlers(opts: { version: string }): void {
         error: err instanceof Error ? err.message : String(err),
       };
     }
+  });
+
+  // Sensor Board v1.3 diagnostics live on port 82 of the camera board.
+  // A one-shot IPC call lets the Drive view poll only while it is visible.
+  ipcMain.handle(IPC.vehicle.sensorBoardSnapshot, async (_e, req: SensorBoardSnapshotRequest): Promise<SensorBoardSnapshotResponse> => {
+    const vehicle = registry.get(req.vehicleId);
+    if (!vehicle || vehicle.sensorBoardRevision !== "1.3" || !vehicle.camera) {
+      return { ranges: null, imu: null, wide: null, rssi: null, error: "v1.3 sensor board camera is not configured" };
+    }
+    const base = new URL(vehicle.camera.baseUrl);
+    base.port = "82";
+    const read = async <T>(path: string): Promise<T | null> => {
+      const url = new URL(path, base);
+      try {
+        const response = await fetch(url, { signal: AbortSignal.timeout(1500) });
+        return response.ok ? await response.json() as T : null;
+      } catch {
+        return null;
+      }
+    };
+    // Keep requests sequential: the board also serves the live camera feed.
+    const ranges = await read<SensorBoardSnapshotResponse["ranges"]>("/ranges");
+    const imu = await read<SensorBoardSnapshotResponse["imu"]>("/imu");
+    const wide = await read<SensorBoardSnapshotResponse["wide"]>("/wide-range");
+    return {
+      ranges,
+      imu,
+      wide,
+      rssi: typeof ranges?.rssi === "number" ? ranges.rssi : null,
+      ...(!ranges && !imu && !wide ? { error: "sensor diagnostics unreachable on port 82" } : {}),
+    };
   });
 
   // ---------- vehicle state stream (long-lived → BMOC session) ----------

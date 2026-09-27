@@ -25,6 +25,7 @@ const CH = {
   vehicleCameraSnapshot: "vehicle:camera-snapshot",
   vehicleCmd: "vehicle:cmd",
   vehicleStop: "vehicle:stop",
+  vehicleSensorBoardSnapshot: "vehicle:sensor-board-snapshot",
   vehicleStreamStateOpen: "vehicle:stream-state-open",
   vehicleStreamStateClose: "vehicle:stream-state-close",
   vehicleStreamEventPrefix: "vehicle:stream-event:",
@@ -63,6 +64,7 @@ const api = {
       ipcRenderer.invoke(CH.vehicleCameraSnapshot, req),
     cmd: (req: unknown) => ipcRenderer.invoke(CH.vehicleCmd, req),
     stop: (req: unknown) => ipcRenderer.invoke(CH.vehicleStop, req),
+    sensorBoardSnapshot: (req: unknown) => ipcRenderer.invoke(CH.vehicleSensorBoardSnapshot, req),
     streamState: async (req: unknown, onEvent: (e: unknown) => void) => {
       const handle = (await ipcRenderer.invoke(CH.vehicleStreamStateOpen, req)) as {
         streamId: string;

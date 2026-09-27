@@ -36,6 +36,7 @@ static constexpr uint8_t TCA9534_ADDRESS = 0x20;
 static constexpr uint8_t SPEAKER_ENABLE_MASK = 0x10; // TCA9534 P4 -> MAX98357A SD_MODE#
 static constexpr uint8_t FRONT_TOF_ADDRESS = 0x30;
 static constexpr uint8_t REAR_TOF_ADDRESS = 0x31;
+static constexpr uint32_t TOF_AUTO_RETRY_MS = 2000;
 static constexpr uint8_t IMU_ADDRESS = 0x68;
 static constexpr uint8_t IMU_WHO_AM_I = 0x61;
 static constexpr uint8_t MIC_PDM_CLK = 21;
@@ -96,6 +97,12 @@ uint32_t bootMs = 0;
 uint8_t ledValues[LED_COUNT][4] = {};
 VL53L1X frontTof;
 VL53L1X rearTof;
+VL53L1X::DistanceMode frontTofMode = VL53L1X::Short;
+VL53L1X::DistanceMode rearTofMode = VL53L1X::Short;
+bool frontTofAuto = true;
+bool rearTofAuto = true;
+uint32_t frontTofInvalidSince = 0;
+uint32_t rearTofInvalidSince = 0;
 Adafruit_VL53L5CX wideTof;
 I2SClass microphoneI2s;
 I2SClass speakerI2s;
@@ -717,8 +724,67 @@ void sendDiagnostics() {
   diagnosticServer.send(200, "application/json", body);
 }
 
+const char *tofModeName(VL53L1X::DistanceMode mode) {
+  switch (mode) {
+    case VL53L1X::Short: return "short";
+    case VL53L1X::Medium: return "medium";
+    case VL53L1X::Long: return "long";
+    default: return "unknown";
+  }
+}
+
+VL53L1X::DistanceMode nextTofMode(VL53L1X::DistanceMode mode) {
+  return mode == VL53L1X::Short ? VL53L1X::Medium :
+    mode == VL53L1X::Medium ? VL53L1X::Long : VL53L1X::Short;
+}
+
+String tofModesJson() {
+  String body = "{\"ok\":true,\"retryMs\":" + String(TOF_AUTO_RETRY_MS);
+  body += ",\"front\":{\"ready\":" + String(frontTofReady ? "true" : "false");
+  body += ",\"mode\":\"" + String(tofModeName(frontTofMode)) + "\",\"auto\":" + String(frontTofAuto ? "true" : "false") + '}';
+  body += ",\"rear\":{\"ready\":" + String(rearTofReady ? "true" : "false");
+  body += ",\"mode\":\"" + String(tofModeName(rearTofMode)) + "\",\"auto\":" + String(rearTofAuto ? "true" : "false") + "}}";
+  return body;
+}
+
+void sendTofMode() {
+  diagnosticServer.send(200, "application/json", tofModesJson());
+}
+
+void setTofMode() {
+  const String sensor = diagnosticServer.arg("sensor");
+  const String mode = diagnosticServer.arg("mode");
+  if ((sensor != "front" && sensor != "rear" && sensor != "both") ||
+      (mode != "auto" && mode != "short" && mode != "medium" && mode != "long")) {
+    diagnosticServer.send(400, "application/json", "{\"ok\":false,\"error\":\"use sensor=front|rear|both and mode=auto|short|medium|long\"}");
+    return;
+  }
+  const bool useFront = sensor != "rear", useRear = sensor != "front";
+  if ((!frontTofReady && useFront) || (!rearTofReady && useRear)) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"requested ToF unavailable\"}");
+    return;
+  }
+  if (mode == "auto") {
+    if (useFront) { frontTofAuto = true; frontTofInvalidSince = 0; }
+    if (useRear) { rearTofAuto = true; rearTofInvalidSince = 0; }
+  } else {
+    const VL53L1X::DistanceMode selected = mode == "short" ? VL53L1X::Short :
+      mode == "medium" ? VL53L1X::Medium : VL53L1X::Long;
+    if ((useFront && !frontTof.setDistanceMode(selected)) ||
+        (useRear && !rearTof.setDistanceMode(selected))) {
+      diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"ToF mode switch failed\"}");
+      return;
+    }
+    if (useFront) { frontTofMode = selected; frontTofAuto = false; frontTofInvalidSince = 0; }
+    if (useRear) { rearTofMode = selected; rearTofAuto = false; rearTofInvalidSince = 0; }
+  }
+  diagnosticServer.send(200, "application/json", tofModesJson());
+}
+
 void appendNarrowRange(String &body, const char *name,
-                       VL53L1X &sensor, bool ready) {
+                       VL53L1X &sensor, bool ready,
+                       VL53L1X::DistanceMode &mode, bool automatic,
+                       uint32_t &invalidSince) {
   bool timedOut = false, valid = false;
   uint16_t mm = 0;
   int status = -1;
@@ -730,11 +796,31 @@ void appendNarrowRange(String &body, const char *name,
       valid = sensor.ranging_data.range_status == VL53L1X::RangeValid;
     }
   }
+  const VL53L1X::DistanceMode sampledMode = mode;
+  bool modeChanged = false;
+  if (automatic && ready) {
+    if (valid) {
+      invalidSince = 0;
+    } else if (invalidSince == 0) {
+      invalidSince = millis();
+    } else if (millis() - invalidSince >= TOF_AUTO_RETRY_MS) {
+      const VL53L1X::DistanceMode candidate = nextTofMode(mode);
+      if (sensor.setDistanceMode(candidate)) {
+        mode = candidate;
+        modeChanged = true;
+      }
+      invalidSince = millis();
+    }
+  }
   body += "{\"name\":\"" + String(name) + "\",\"ready\":";
   body += ready ? "true" : "false";
   body += ",\"timeout\":";
   body += timedOut ? "true" : "false";
   body += ",\"rangeStatus\":" + String(status);
+  body += ",\"mode\":\"" + String(tofModeName(sampledMode)) + "\"";
+  body += ",\"activeMode\":\"" + String(tofModeName(mode)) + "\"";
+  body += ",\"auto\":" + String(automatic ? "true" : "false");
+  body += ",\"modeChanged\":" + String(modeChanged ? "true" : "false");
   body += ",\"distanceMm\":";
   body += valid ? String(mm) : "null";
   body += '}';
@@ -742,10 +828,13 @@ void appendNarrowRange(String &body, const char *name,
 
 void sendRanges() {
   String body = "{\"ok\":true,\"singleZone\":[";
-  appendNarrowRange(body, "front", frontTof, frontTofReady);
+  appendNarrowRange(body, "front", frontTof, frontTofReady,
+    frontTofMode, frontTofAuto, frontTofInvalidSince);
   body += ',';
-  appendNarrowRange(body, "rear", rearTof, rearTofReady);
-  body += "],\"wideReady\":" + String(wideTofReady ? "true" : "false") + '}';
+  appendNarrowRange(body, "rear", rearTof, rearTofReady,
+    rearTofMode, rearTofAuto, rearTofInvalidSince);
+  body += "],\"wideReady\":" + String(wideTofReady ? "true" : "false");
+  body += ",\"rssi\":" + String(WiFi.RSSI()) + '}';
   diagnosticServer.send(200, "application/json", body);
 }
 
@@ -1415,6 +1504,8 @@ void setup() {
 
   diagnosticServer.on("/diagnostics", HTTP_GET, sendDiagnostics);
   diagnosticServer.on("/ranges", HTTP_GET, sendRanges);
+  diagnosticServer.on("/tof-mode", HTTP_GET, sendTofMode);
+  diagnosticServer.on("/tof-mode", HTTP_POST, setTofMode);
   diagnosticServer.on("/wide-range", HTTP_GET, sendWideRange);
   diagnosticServer.on("/imu", HTTP_GET, sendImu);
   diagnosticServer.on("/mic-levels", HTTP_GET, sendMicrophoneLevels);

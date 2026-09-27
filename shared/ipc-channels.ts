@@ -68,6 +68,18 @@ export interface VehicleStopRequest {
   vehicleId: string;
 }
 
+export interface SensorBoardSnapshotRequest {
+  vehicleId: string;
+}
+
+export interface SensorBoardSnapshotResponse {
+  ranges: { ok: boolean; singleZone: Array<{ name: string; ready: boolean; timeout: boolean; rangeStatus: number; distanceMm: number | null }>; wideReady: boolean; rssi?: number } | null;
+  imu: { ok: boolean; accelG: number[]; gyroDps: number[]; temperatureC: number } | null;
+  wide: { ok: boolean; ready: boolean; ageMs?: number; rawDistanceMm?: number[]; targetStatus?: number[] } | null;
+  rssi: number | null;
+  error?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Camera stream cache (one upstream connection per vehicle, shared by every
 // consumer in this Helm process — renderer, CLI snapshot, future planner).
@@ -319,6 +331,7 @@ export interface HelmAPI {
     cameraSnapshot(req: VehicleCameraSnapshotRequest): Promise<VehicleCameraSnapshotResponse>;
     cmd(req: VehicleCmdRequest): Promise<VehicleCmdResponse>;
     stop(req: VehicleStopRequest): Promise<VehicleCmdResponse>;
+    sensorBoardSnapshot(req: SensorBoardSnapshotRequest): Promise<SensorBoardSnapshotResponse>;
     streamState(req: StateStreamRequest, onEvent: (e: StateStreamEvent) => void): Promise<{
       handle: StreamHandle;
       stop: () => Promise<void>;
@@ -378,6 +391,7 @@ export const IPC = {
     cameraSnapshot: "vehicle:camera-snapshot",
     cmd: "vehicle:cmd",
     stop: "vehicle:stop",
+    sensorBoardSnapshot: "vehicle:sensor-board-snapshot",
     streamStateOpen: "vehicle:stream-state-open",
     streamStateClose: "vehicle:stream-state-close",
     /** Per-stream event channel template; actual channel = streamEventPrefix + streamId */

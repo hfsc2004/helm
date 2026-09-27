@@ -5,6 +5,30 @@ All notable changes to PSF Helm will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.7] - 2026-09-26
+
+### Added
+- Show live Sensor Board v1.3 ToF and IMU data in the Drive sidebar, including
+  an 8×8 distance map, Wi-Fi RSSI, and IMU die temperature. Distance readouts
+  switch from mm to cm at 100 mm and to m at 1,000 mm.
+- Add `helm vehicle-tof-mode` for agents to inspect, pin, or restore automatic
+  Short/Medium/Long modes independently on the two single-zone ToF sensors.
+  Persistent invalid returns trigger a mode retry about every two seconds
+  while `/ranges` is polled; valid returns hold the working mode. No user-facing
+  mode selector or reflashing is needed for runtime changes.
+
+### Changed
+- Preserve the last good IMU and Wi-Fi readouts across transient request
+  failures, labeling old samples as stale instead of briefly blanking them.
+  Wi-Fi RSSI now comes from the diagnostic port rather than competing with
+  MJPEG traffic on the camera server.
+- Distinguish weak ToF returns and timeouts from valid distances in the Drive
+  panel instead of displaying an unexplained dash.
+
+### Known issues
+- IMU I²C reads can still fail intermittently; held readouts are marked stale
+  until a fresh sample succeeds. Microphone audio remains under investigation.
+
 ## [0.3.6] - 2026-09-26
 
 ### Fixed

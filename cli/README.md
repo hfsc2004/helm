@@ -32,3 +32,21 @@ backpressure; the entire audio file is not loaded into board memory. By
 default the command derives the host from the vehicle's camera URL; use
 `--base-url http://<board-ip>:82` if that address differs. The vehicle must be
 registered as Sensor Board v1.3. See the [firmware bench notes](../firmware/templates/sensor-board-v1-3-esp32s3/README.md).
+
+## PSF Sensor Board v1.3 ToF modes
+
+The board starts both single-zone ToF sensors in automatic mode. While Helm's
+Drive panel (or another client) polls `/ranges`, an invalid return lasting
+about two seconds makes that sensor try Short, Medium, and Long in sequence.
+A valid return holds its current mode. Agents can inspect or override the
+mode without reflashing:
+
+```bash
+npm run helm -- vehicle-tof-mode Truck status
+npm run helm -- vehicle-tof-mode Truck long --sensor front
+npm run helm -- vehicle-tof-mode Truck auto --sensor front
+```
+
+`--sensor` also accepts `rear` or `both` (the default). An explicit mode
+disables automatic fallback for the selected sensor until `auto` is restored
+or the board reboots. The 8×8 wide sensor is unaffected.

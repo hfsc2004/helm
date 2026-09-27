@@ -16,9 +16,15 @@ for this v1.3 bring-up configuration.
   **not** a working distance or motion measurement. The three ToFs share
   `0x29` only before the two narrow devices receive their new addresses.
 - Single-zone ranging on port 82: `GET /ranges` uses the Pololu VL53L1X
-  driver to read front and rear VL53L1CB sensors in short mode. The devices
-  are assigned `0x30` and `0x31` at startup; `distanceMm` is returned only
-  when the driver reports a valid range.
+  driver to read front and rear VL53L1CB sensors. The devices are assigned
+  `0x30` and `0x31` at startup; `distanceMm` is returned only when the driver
+  reports a valid range. Each sensor starts in Short mode with auto fallback:
+  after about two seconds of invalid returns while `/ranges` is polled, it
+  tries Medium, then Long, then Short again. A valid return holds its mode.
+  `GET /tof-mode` reports the active modes; `POST /tof-mode?mode=auto|short|medium|long&sensor=front|rear|both`
+  changes them without reflashing. A pinned mode lasts until changed or rebooted.
+  `/ranges` also reports Wi-Fi RSSI in dBm so the Drive readout does not need
+  to poll the camera server while MJPEG is streaming.
 - Wide ranging on port 82: `GET /wide-range` returns the latest VL53L5CX
   8×8 frame as 64 raw millimeter distances and 64 target-status values,
   with its age in milliseconds. The sensor remains at `0x29`. Live frames

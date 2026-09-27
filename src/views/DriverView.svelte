@@ -12,6 +12,7 @@
   import CameraFeed from "../components/CameraFeed.svelte";
   import AudioFeed from "../components/AudioFeed.svelte";
   import ActivityLog from "../components/ActivityLog.svelte";
+  import SensorBoardReadouts from "../components/SensorBoardReadouts.svelte";
   import { hasDriveControl } from "@shared/vehicle-contract";
 
   $: selectedVehicle = $fleet.vehicles.find((v) => v.id === $fleet.selectedId) ?? null;
@@ -48,7 +49,13 @@
         </p>
       </section>
     {:else if !canDrive}
-      <section><p class="muted">PSF Sensor Board v1.3 bring-up: camera only. Motor controls and drive telemetry are not available in this firmware.</p></section>
+      {#if selectedVehicle?.sensorBoardRevision === "1.3"}
+        {#key selectedVehicle.id}
+          <SensorBoardReadouts vehicleId={selectedVehicle.id} />
+        {/key}
+      {:else}
+        <section><p class="muted">Motor controls and drive telemetry are not available for this vehicle.</p></section>
+      {/if}
     {:else}
       {#if $inputMode === "gamepad"}
         <Gamepad />

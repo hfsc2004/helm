@@ -432,7 +432,7 @@ Helm flashes microcontrollers from the same Devices tab you use to inspect them.
 
 If the button is greyed out, a yellow `!` chip next to it names the missing field — no guessing which gate is closed.
 
-The v1.3 bring-up image uses `esp32:esp32:esp32s3:PSRAM=opi`; a compile line
+The v1.3 bring-up image uses `esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=no_ota`; a compile line
 showing `esp32:esp32:esp32` means the classic ESP32 template was selected.
 Its camera runs on port 81 and bench diagnostics, ToF/IMU readings, LED tests,
 and speaker playback run on port 82. All three ToF devices, the IMU, RGBW LEDs,
@@ -544,7 +544,9 @@ Working end-to-end on Linux x64:
 - ✅ **Dual-board vehicles**: separate drive ESP32 + ESP32-S3 camera-and-video board, each with its own IP, Wi-Fi credentials, static-IP block, and flash params — mirrors the PSF Core Relay "Gateway Card" shape
 - ✅ **Configure-and-flash from the UI**: click a detected board → pick a template → fill in Wi-Fi / camera params → flash with live arduino-cli output
 - ✅ **PSF Sensor Board revision setting** per vehicle (v1.1 or v1.3) and v1.3 ESP32-S3-CAM bench bring-up template; front/rear ToF ranging, raw 8×8 depth frames, IMU samples, RGBW LEDs, and speaker playback have been hardware-tested. Microphone audio and collision-control integration remain follow-up work
-- ✅ **Live v1.3 sensor readouts in Drive** — single-zone ToF distances, raw 8×8 ToF map, chip-frame acceleration/gyro, Wi-Fi RSSI, and IMU die temperature. An agent-facing `vehicle-tof-mode` CLI controls Short/Medium/Long modes; automatic fallback tries another mode after persistent invalid returns while ranges are polled. No v1.3 motor controls are implied.
+- ✅ **Live v1.3 sensor readouts in Drive** — front/rear VL53L1CB full-field and four-quadrant scans, raw 8×8 VL53L5CX ToF map with an approximate front-quadrant overlay, chip-frame acceleration/gyro, Wi-Fi RSSI, and IMU die temperature. Each narrow region retains its last confirmed distance with an age/stale indication. The overlay is uncalibrated and does not imply pixel alignment. An agent-facing `vehicle-tof-mode` CLI controls the full-field Short/Medium/Long mode; quadrants scan in Short mode. Automatic fallback tries another full-field mode after persistent invalid returns. No v1.3 motor controls are implied.
+- 🧪 **ELEGOO Uno V4 UART bring-up for v1.3** — prepared firmware and Helm tests for the stock 9600-baud serial protocol: passive UART status, ultrasonic and line readings, servo positions, bounded left/right-pair motor pulses, stop, and shield RGB-off. Hardware wiring and installed Uno sketch are not yet confirmed; do not treat an initialized UART as a successful Uno connection. A power indicator LED is not software-controlled by the RGB command.
+- ✅ **Boot-relative v1.3 orientation** — roll, pitch, and yaw are zeroed after stationary startup calibration and tracked on the board between Helm polls. Agents can re-zero a stationary pose with `vehicle-imu-zero`; yaw can drift without a compass.
 - ✅ **mDNS discovery** — drive boards advertise as `<name>.local` so DHCP IP changes don't break the connection; the host-side HTTP layer translates `ENOTFOUND` on `.local` names into "install Avahi (Linux) or Bonjour (Windows)" instead of a raw DNS error
 - ✅ **Host-side Wi-Fi scan** in the flash wizard — SSID dropdown lists networks the host sees (Linux/`nmcli` today, macOS/Windows fall back to text input), filtered to the bands the target board's radio can actually join (no 5GHz networks offered for an ESP32)
 - ✅ **Flash wizard polish** — yellow `!` chip names the missing field instead of silently disabling the Flash button; password reveal eye-icon so the user can verify a Wi-Fi typo *before* it gets baked into firmware; re-flashing the same robot updates the existing registry entry instead of erroring with "vehicle already exists"

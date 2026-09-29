@@ -13,6 +13,7 @@
   import AudioFeed from "../components/AudioFeed.svelte";
   import ActivityLog from "../components/ActivityLog.svelte";
   import SensorBoardReadouts from "../components/SensorBoardReadouts.svelte";
+  import UnoControls from "../components/UnoControls.svelte";
   import { hasDriveControl } from "@shared/vehicle-contract";
 
   $: selectedVehicle = $fleet.vehicles.find((v) => v.id === $fleet.selectedId) ?? null;
@@ -51,6 +52,7 @@
     {:else if !canDrive}
       {#if selectedVehicle?.sensorBoardRevision === "1.3"}
         {#key selectedVehicle.id}
+          <UnoControls vehicleId={selectedVehicle.id} />
           <SensorBoardReadouts vehicleId={selectedVehicle.id} />
         {/key}
       {:else}

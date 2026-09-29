@@ -8,6 +8,11 @@ The agent-first command-line surface for PSF Helm. Subcommands are designed for 
 - Streaming commands emit NDJSON (newline-delimited JSON) on stdout.
 - Logs go to stderr; stdout stays clean for event streams.
 - Every command supports `--timeout <ms>`, `--trace-id <id>`, `--dry-run` where mutating.
+- `helm vehicle-uno <id> status|ultrasonic|line|servo|motor|stop|rgb-off|baud`
+  uses the v1.3 board's port-82 ELEGOO UART bridge. `motor` requires
+  `--direction`, `--speed`, and `--ms`; it sends only a bounded 100–800 ms
+  pulse. `servo` requires `--angle 10..170`. Start with `status` and the
+  sensor queries; do not test motors until the wheels are clear of the ground.
 - Exit codes are distinct (0 success, 1 command failure, 2 transport failure, 3 safety abort, 64 usage error).
 - `helm describe` emits the full command schema as JSON so agents can introspect without parsing help text.
 
@@ -50,3 +55,14 @@ npm run helm -- vehicle-tof-mode Truck auto --sensor front
 `--sensor` also accepts `rear` or `both` (the default). An explicit mode
 disables automatic fallback for the selected sensor until `auto` is restored
 or the board reboots. The 8×8 wide sensor is unaffected.
+
+## PSF Sensor Board v1.3 relative orientation
+
+`GET /imu` includes boot-relative roll, pitch, and yaw after the board has
+collected 80 stationary samples for gyro-bias calibration. Roll and pitch are
+corrected toward gravity; yaw has no compass reference and can drift. An agent
+can set the current stationary pose as zero without reflashing:
+
+```bash
+npm run helm -- vehicle-imu-zero Truck
+```

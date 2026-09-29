@@ -13,6 +13,8 @@ import type {
   StateStreamRequest,
   SensorBoardSnapshotRequest,
   SensorBoardSnapshotResponse,
+  SensorBoardUnoRequest,
+  SensorBoardUnoResponse,
   VehicleAddRequest,
   VehicleCmdRequest,
   VehicleRemoveRequest,
@@ -329,6 +331,62 @@ export function registerIpcHandlers(opts: { version: string }): void {
       rssi: typeof ranges?.rssi === "number" ? ranges.rssi : null,
       ...(!ranges && !imu && !wide ? { error: "sensor diagnostics unreachable on port 82" } : {}),
     };
+  });
+
+  ipcMain.handle(IPC.vehicle.sensorBoardUno, async (_e, req: SensorBoardUnoRequest): Promise<SensorBoardUnoResponse> => {
+    const vehicle = registry.get(req.vehicleId);
+    if (!vehicle || vehicle.sensorBoardRevision !== "1.3" || !vehicle.camera) {
+      return { ok: false, error: "v1.3 sensor board camera is not configured" };
+    }
+    const routes: Record<SensorBoardUnoRequest["action"], string> = {
+      status: "/uno/status", ultrasonic: "/uno/ultrasonic", line: "/uno/line",
+      servo: "/uno/servo", motor: "/uno/motor-pulse", stop: "/uno/stop",
+      "rgb-off": "/uno/rgb-off", baud: "/uno/baud",
+    };
+    const route = routes[req.action];
+    if (!route) return { ok: false, error: "unknown Uno action" };
+    const url = new URL(vehicle.camera.baseUrl);
+    url.port = "82";
+    url.pathname = route;
+    url.search = "";
+    if (req.action === "motor") {
+      if (!["left", "right", "forward", "reverse"].includes(req.direction ?? "") ||
+          !Number.isInteger(req.speed) || req.speed! < 0 || req.speed! > 160 ||
+          !Number.isInteger(req.ms) || req.ms! < 100 || req.ms! > 800) {
+        return { ok: false, error: "motor requires direction, speed 0..160, and duration 100..800 ms" };
+      }
+      url.searchParams.set("direction", req.direction!);
+      url.searchParams.set("speed", String(req.speed));
+      url.searchParams.set("ms", String(req.ms));
+    } else if (req.action === "servo") {
+      const channel = req.channel ?? 1;
+      const minimum = channel === 2 ? 30 : 10;
+      const maximum = channel === 2 ? 110 : 170;
+      if (![1, 2].includes(channel) || !Number.isInteger(req.angle) || req.angle! < minimum || req.angle! > maximum) {
+        return { ok: false, error: "servo 1 requires 10..170 degrees; servo 2 requires 30..110 degrees" };
+      }
+      url.searchParams.set("angle", String(req.angle));
+      url.searchParams.set("channel", String(channel));
+    } else if (req.action === "baud") {
+      if (![9600, 19200, 38400, 57600, 115200].includes(req.baud ?? 0)) {
+        return { ok: false, error: "unsupported baud" };
+      }
+      url.searchParams.set("baud", String(req.baud));
+    }
+    try {
+      if (req.action === "servo") {
+        const status = await fetch(new URL("/uno/status", url), { signal: AbortSignal.timeout(2500) });
+        const statusBody = await status.json() as SensorBoardUnoResponse;
+        if (!status.ok || statusBody.servoCommandVersion !== 2) {
+          return { ok: false, error: "servo command requires updated ESP32-S3 firmware" };
+        }
+      }
+      const method = ["status", "ultrasonic", "line"].includes(req.action) ? "GET" : "POST";
+      const response = await fetch(url, { method, signal: AbortSignal.timeout((req.ms ?? 0) + 2500) });
+      return await response.json() as SensorBoardUnoResponse;
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
   });
 
   // ---------- vehicle state stream (long-lived → BMOC session) ----------

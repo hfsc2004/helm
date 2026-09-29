@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Pseudo Science Fiction
-import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
 import * as bmoc from "../bmoc/index.js";
@@ -328,6 +328,19 @@ export async function flash(
       copyFileSync(join(tmpl.dir, filename), join(sketchDir, filename));
     } catch (error) {
       const reason = `could not stage sketch file ${filename}: ${String(error)}`;
+      onProgress({ stage: "error", message: reason });
+      return { ok: false, reason };
+    }
+  }
+  // Arduino compiles source files recursively beneath a sketch's src/ folder.
+  // Keep large, template-local drivers there rather than flattening their
+  // source trees into sketchFiles or mutating the user's global libraries.
+  const templateSrc = join(tmpl.dir, "src");
+  if (existsSync(templateSrc)) {
+    try {
+      cpSync(templateSrc, join(sketchDir, "src"), { recursive: true });
+    } catch (error) {
+      const reason = `could not stage template src: ${String(error)}`;
       onProgress({ stage: "error", message: reason });
       return { ok: false, reason };
     }

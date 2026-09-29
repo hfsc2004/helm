@@ -9,28 +9,67 @@ for this v1.3 bring-up configuration.
 ## Implemented
 
 - Camera on port 81: `GET /health`, `GET /capture`, `GET /stream`.
+- ELEGOO Smart Robot Car V4.0 Uno UART bridge on port 82 (unverified on the
+  mounted hardware): GPIO43 receives, GPIO44 transmits, initially at 9600 baud.
+  The ESP releases its UART0 debug console before attaching UART1 to those
+  pins. `GET /uno/status` is passive; `POST /uno/baud?baud=9600|19200|38400|57600|115200`
+  changes the listening speed at runtime. For UART bring-up, `POST /uno/pins?rx=43&tx=44`
+  or `rx=44&tx=43` reverses the ESP pin roles without another flash; boot
+  defaults to the assembled-board RX43/TX44 mapping. The older pinout text
+  lists the opposite direction and needs reconciliation with the physical PCB.
+  `GET /uno/ultrasonic` sends ELEGOO
+  `N21,D1=2`; `GET /uno/line` sends `N22,D1=0..2` for left/middle/right.
+  `POST /uno/servo?channel=1|2&angle=...` sends `N5` to servo 1 (D10,
+  10..170°) or servo 2 (D11, 30..110°), rounded to the stock sketch's
+  ten-degree resolution. The D10 range stays within 80° of the 90° center,
+  below the mounted board's ±90° cable limit.
+  `POST /uno/motor-pulse?direction=left|right|forward|reverse&speed=0..160&ms=100..800`
+  sends the stock firmware's timed `N2` command, waits for completion, then
+  sends `N110` stop; `POST /uno/stop` sends the same stop immediately. The
+  four physical motors are wired as left and right pairs by the ELEGOO shield,
+  not individually addressable wheels. `POST /uno/rgb-off` sends `N8` with
+  zero RGB values; it does not control a hardwired Uno power LED. No UART
+  command is sent automatically at boot. These commands assume the stock
+  ELEGOO V4 serial protocol; a different Uno sketch may not respond. Test
+  the UART wiring and Uno firmware before using the motor endpoint.
 - Diagnostics on port 82: `GET /diagnostics` lists I²C addresses, reads back
   the TCA9534 output/configuration registers, and reports whether the ToF
   default address and IMU address respond. The expander is initialized after
   Wi-Fi setup so the sensor rail has time to settle. Address presence is
   **not** a working distance or motion measurement. The three ToFs share
   `0x29` only before the two narrow devices receive their new addresses.
-- Single-zone ranging on port 82: `GET /ranges` uses the Pololu VL53L1X
-  driver to read front and rear VL53L1CB sensors. The devices are assigned
-  `0x30` and `0x31` at startup; `distanceMm` is returned only when the driver
-  reports a valid range. Each sensor starts in Short mode with auto fallback:
-  after about two seconds of invalid returns while `/ranges` is polled, it
-  tries Medium, then Long, then Short again. A valid return holds its mode.
+- Narrow ranging on port 82: `GET /ranges` uses the VL53L1CB histogram
+  driver, rather than the VL53L1X driver. The devices are assigned `0x30` and
+  `0x31` at startup. Measurements run continuously; HTTP requests read cached
+  results and never trigger a blocking ranging cycle. `distanceMm` is returned
+  only for a fresh, valid result. `ageMs` and `driverError` expose stale frames
+  and I²C/driver failures. Each sensor alternates a full-field ranging phase
+  with a four-region scan (the four 8×8-SPAD quadrants). The full field starts
+  in Medium mode, and the quadrants always use Short mode. Each region reports
+  its latest raw targets, age, and a distance confirmed by two similar valid
+  samples. Confirmed values persist but their age keeps increasing; consumers
+  must not treat stale values as current obstacle readings. After about two
+  seconds without new frames, a scan watchdog restarts that sensor in the
+  full-field phase; `/ranges` exposes its `recoveryCount`. After about two
+  seconds without a valid full-field return, automatic fallback tries Long,
+  then Short, then Medium. A valid return holds the full-field mode. With the
+  CB Ranging preset, Medium is ST's maximum-distance setting; Long favors
+  lower power. The `full` result is the strongest valid target over the whole
+  field, not a directional center-only measurement.
   `GET /tof-mode` reports the active modes; `POST /tof-mode?mode=auto|short|medium|long&sensor=front|rear|both`
   changes them without reflashing. A pinned mode lasts until changed or rebooted.
   `/ranges` also reports Wi-Fi RSSI in dBm so the Drive readout does not need
-  to poll the camera server while MJPEG is streaming.
+  to poll the camera server while MJPEG is streaming. Helm's Drive view shows
+  all five regions for front and rear, plus an approximate front-quadrant
+  overlay on the separate VL53L5CX 8×8 map. The CB quadrants and wide pixels
+  are not calibrated to one another, and chip ROI left/right orientation has
+  not yet been verified on the mounted board.
 - Wide ranging on port 82: `GET /wide-range` returns the latest VL53L5CX
   8×8 frame as 64 raw millimeter distances and 64 target-status values,
   with its age in milliseconds. The sensor remains at `0x29`. Live frames
   were received on the bench; raw values are not collision decisions.
-- IMU on port 82: `GET /imu` reads the ICM-42607-C's three accelerometer and
-  three gyro axes in one burst, plus die temperature. It reports both raw
+- IMU on port 82: `GET /imu` serves the latest ICM-42607-C sample of three
+  accelerometer and three gyro axes, plus die temperature. It reports both raw
   counts and nominal g / degrees-per-second values at 100 Hz, ±2 g and
   ±250 dps settings. Live chip ID `0x61` and repeat samples were verified;
   a stationary, box-leaning board measured about 1 g in vector magnitude
@@ -43,7 +82,15 @@ for this v1.3 bring-up configuration.
   flat. Those two vectors differ by roughly 57 degrees, so the earlier
   estimated 80–85 degree physical angle is not yet a calibration reference.
   Axes are in the chip's frame, not a verified truck-forward frame; no
-  mounting correction, bias calibration or sensor fusion is applied.
+  mounting correction is applied. Firmware now samples continuously near
+  50 Hz, discards implausible I²C samples, and averages 80 stationary samples
+  after startup to measure gyro bias and set the boot pose to roll/pitch/yaw
+  zero. A quaternion integrates gyro motion between Helm polls and uses gravity
+  for roll/pitch correction. `orientationDeg` reports the estimated pose
+  relative to that boot reference; yaw remains relative and slowly drifts
+  without a compass. `POST /imu/zero` resets the reference to a fresh,
+  stationary pose without reflashing. `orientationReady` remains false until
+  startup calibration completes.
 - Experimental stereo PDM capture on port 82: `GET /mic-levels` samples both
   channels for 128 ms and reports DC mean, AC RMS and peak counts;
   `GET /mic-capture.wav` returns a one-second, 16 kHz, 16-bit stereo WAV.
@@ -105,7 +152,7 @@ for this v1.3 bring-up configuration.
   chime sequence for live tuning without rebooting.
   The bundled `startup_chime.h` is the 1.55-second source converted from
   44.1 kHz stereo to 16 kHz mono PCM; playback duplicates the samples into
-  both I²S slots at 30% gain with short fades. Regenerate the header with
+  both I²S slots at 22.5% gain with short fades. Regenerate the header with
   `node firmware/templates/sensor-board-v1-3-esp32s3/generate-startup-chime.mjs`.
   Helm stages the header with the sketch on every flash. The boot chime now
   plays before allocating the 32 KiB streaming queue, preserving heap during
@@ -265,10 +312,13 @@ map is fixed by this PCB; do not select an unrelated pin profile. The board's
 own USB-C socket is power-only. Use the ESP32-S3-CAM module's programming
 connector for flashing, after confirming the module and serial port.
 
-The default FQBN is `esp32:esp32:esp32s3:PSRAM=opi`, targeting the photographed
-GOOUUU ESP32-S3-CAM module. Helm installs the pinned Pololu VL53L1X 1.3.1
-and Adafruit VL53L5CX 1.0.1 Arduino libraries during a normal flash, if they
-are not already present. The template can be rendered without upload:
+The default FQBN is `esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=no_ota`,
+targeting the photographed GOOUUU ESP32-S3-CAM module. The 2 MB app partition
+fits the CB driver even on a 4 MB module; it does not support OTA updates.
+The VL53L1CB driver is bundled under `src/` from STM32duino VL53L1 2.1.0,
+with a bounded, error-reporting ESP32 I²C adapter and its license in
+`VL53L1-LICENSE.md`. Helm installs Adafruit VL53L5CX 1.0.1 during a normal
+flash if needed. The template can be rendered without upload:
 
 ```bash
 npm run helm -- flash-render --template sensor-board-v1-3-esp32s3 \

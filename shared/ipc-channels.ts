@@ -72,9 +72,58 @@ export interface SensorBoardSnapshotRequest {
   vehicleId: string;
 }
 
+export interface SensorBoardUnoRequest {
+  vehicleId: string;
+  action: "status" | "ultrasonic" | "line" | "servo" | "motor" | "stop" | "rgb-off" | "baud";
+  direction?: "left" | "right" | "forward" | "reverse";
+  speed?: number;
+  ms?: number;
+  angle?: number;
+  channel?: 1 | 2;
+  baud?: number;
+}
+
+export interface SensorBoardUnoResponse {
+  ok: boolean;
+  error?: string;
+  [key: string]: unknown;
+}
+
+export interface SensorBoardScanZone {
+  id: string;
+  ageMs: number | null;
+  rangeStatus: number;
+  distanceMm: number | null;
+  stableDistanceMm: number | null;
+  stableAgeMs: number | null;
+  targets: Array<{ distanceMm: number; rangeStatus: number; signalMcps: number }>;
+}
+
+export interface SensorBoardNarrowRange {
+  name: string;
+  ready: boolean;
+  timeout: boolean;
+  rangeStatus: number;
+  distanceMm: number | null;
+  ageMs?: number | null;
+  mode?: string;
+  activeMode?: string;
+  auto?: boolean;
+  driverError?: number;
+  scan?: {
+    phase: "full" | "quadrants";
+    quadrantMode: string;
+    orientationVerified: boolean;
+    zones: SensorBoardScanZone[];
+  };
+}
+
 export interface SensorBoardSnapshotResponse {
-  ranges: { ok: boolean; singleZone: Array<{ name: string; ready: boolean; timeout: boolean; rangeStatus: number; distanceMm: number | null }>; wideReady: boolean; rssi?: number } | null;
-  imu: { ok: boolean; accelG: number[]; gyroDps: number[]; temperatureC: number } | null;
+  ranges: { ok: boolean; singleZone: SensorBoardNarrowRange[]; wideReady: boolean; rssi?: number } | null;
+  imu: { ok: boolean; accelG: number[]; gyroDps: number[]; temperatureC: number;
+    orientationReady?: boolean; orientationDeg?: number[] | null;
+    orientationAgeMs?: number; calibrationSamples?: number; calibrationTarget?: number;
+    gyroBiasDps?: number[] } | null;
   wide: { ok: boolean; ready: boolean; ageMs?: number; rawDistanceMm?: number[]; targetStatus?: number[] } | null;
   rssi: number | null;
   error?: string;
@@ -332,6 +381,7 @@ export interface HelmAPI {
     cmd(req: VehicleCmdRequest): Promise<VehicleCmdResponse>;
     stop(req: VehicleStopRequest): Promise<VehicleCmdResponse>;
     sensorBoardSnapshot(req: SensorBoardSnapshotRequest): Promise<SensorBoardSnapshotResponse>;
+    sensorBoardUno(req: SensorBoardUnoRequest): Promise<SensorBoardUnoResponse>;
     streamState(req: StateStreamRequest, onEvent: (e: StateStreamEvent) => void): Promise<{
       handle: StreamHandle;
       stop: () => Promise<void>;
@@ -392,6 +442,7 @@ export const IPC = {
     cmd: "vehicle:cmd",
     stop: "vehicle:stop",
     sensorBoardSnapshot: "vehicle:sensor-board-snapshot",
+    sensorBoardUno: "vehicle:sensor-board-uno",
     streamStateOpen: "vehicle:stream-state-open",
     streamStateClose: "vehicle:stream-state-close",
     /** Per-stream event channel template; actual channel = streamEventPrefix + streamId */

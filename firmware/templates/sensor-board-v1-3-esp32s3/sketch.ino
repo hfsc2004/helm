@@ -5,6 +5,7 @@
 
 #include <WiFi.h>
 #include <WebServer.h>
+#include <HardwareSerial.h>
 #include <Wire.h>
 #include <ESPmDNS.h>
 #include <esp_camera.h>
@@ -17,8 +18,10 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
-#include <VL53L1X.h>
+#include "src/vl53l1_class.h"
+#include "narrow_tof_sample.h"
 #include <Adafruit_VL53L5CX.h>
+#include <math.h>
 #include "startup_chime.h"
 
 static const char *WIFI_SSID = "{{wifi.ssid}}";
@@ -39,6 +42,9 @@ static constexpr uint8_t REAR_TOF_ADDRESS = 0x31;
 static constexpr uint32_t TOF_AUTO_RETRY_MS = 2000;
 static constexpr uint8_t IMU_ADDRESS = 0x68;
 static constexpr uint8_t IMU_WHO_AM_I = 0x61;
+static constexpr uint32_t IMU_SAMPLE_INTERVAL_MS = 20;
+static constexpr uint16_t IMU_CALIBRATION_SAMPLES = 80;
+static constexpr float IMU_TILT_CORRECTION = 1.5f;
 static constexpr uint8_t MIC_PDM_CLK = 21;
 static constexpr uint8_t MIC_PDM_DATA = 14;
 static constexpr uint32_t MIC_SAMPLE_RATE = 16000;
@@ -52,19 +58,23 @@ static constexpr uint16_t SPEAKER_TONE_MS = 350;
 static constexpr int16_t SPEAKER_TONE_AMPLITUDE = 6000;
 static constexpr size_t SPEAKER_CHUNK_BYTES = 1024;
 static constexpr uint8_t SPEAKER_BUFFER_CHUNKS = 32;
-static constexpr uint8_t STARTUP_CHIME_GAIN_PERCENT = 30;
+// 22.5% amplitude: 25% quieter than the previous 30% boot setting.
+static constexpr uint16_t STARTUP_CHIME_GAIN_PERMILLE = 225;
 static constexpr uint16_t STARTUP_CHIME_FADE_FRAMES = SPEAKER_SAMPLE_RATE / 50;
 
 constexpr int16_t scaleStartupChimeSample(int16_t sample, int32_t fade) {
   return static_cast<int16_t>(static_cast<int64_t>(sample) *
-    STARTUP_CHIME_GAIN_PERCENT * fade / (100 * STARTUP_CHIME_FADE_FRAMES));
+    STARTUP_CHIME_GAIN_PERMILLE * fade / (1000 * STARTUP_CHIME_FADE_FRAMES));
 }
-static_assert(scaleStartupChimeSample(-10000, STARTUP_CHIME_FADE_FRAMES) == -3000,
+static_assert(scaleStartupChimeSample(-10000, STARTUP_CHIME_FADE_FRAMES) == -2250,
   "startup chime gain must preserve negative samples");
 static constexpr uint8_t LED_PIN = 48;
 static constexpr uint8_t LED_COUNT = 3;
 static constexpr uint8_t CAMERA_PORT = 81;
 static constexpr uint8_t DIAGNOSTIC_PORT = 82;
+static constexpr uint8_t UNO_UART_DEFAULT_RX = 43;
+static constexpr uint8_t UNO_UART_DEFAULT_TX = 44;
+static constexpr uint32_t UNO_UART_DEFAULT_BAUD = 9600;
 
 // GOOUUU ESP32-S3-CAM pin map; matches Espressif's BOARD_ESP32S3_GOOUUU.
 // GPIO4 is camera SCCB data. The board's IR strobe switch must stay in its
@@ -95,17 +105,28 @@ int startupChimeI2sError = 0;
 int imuWhoAmI = -1;
 uint32_t bootMs = 0;
 uint8_t ledValues[LED_COUNT][4] = {};
-VL53L1X frontTof;
-VL53L1X rearTof;
-VL53L1X::DistanceMode frontTofMode = VL53L1X::Short;
-VL53L1X::DistanceMode rearTofMode = VL53L1X::Short;
+VL53L1 frontTof(&Wire, -1);
+VL53L1 rearTof(&Wire, -1);
+VL53L1_DistanceModes frontTofMode = VL53L1_DISTANCEMODE_MEDIUM;
+VL53L1_DistanceModes rearTofMode = VL53L1_DISTANCEMODE_MEDIUM;
 bool frontTofAuto = true;
 bool rearTofAuto = true;
 uint32_t frontTofInvalidSince = 0;
 uint32_t rearTofInvalidSince = 0;
+NarrowTofSample frontTofSample, rearTofSample;
 Adafruit_VL53L5CX wideTof;
 I2SClass microphoneI2s;
 I2SClass speakerI2s;
+HardwareSerial unoUart(1);
+bool unoUartReady = false;
+uint32_t unoUartBaud = UNO_UART_DEFAULT_BAUD;
+uint8_t unoUartRxPin = UNO_UART_DEFAULT_RX;
+uint8_t unoUartTxPin = UNO_UART_DEFAULT_TX;
+uint32_t unoLastRxAt = 0;
+uint16_t unoRequestId = 0;
+String unoRecentRx;
+String unoFrameBuffer;
+String unoLastFrame;
 struct SpeakerPcmChunk {
   uint16_t size;
   uint8_t data[SPEAKER_CHUNK_BYTES];
@@ -124,6 +145,24 @@ VL53L5CX_ResultsData wideResults = {};
 bool wideHasFrame = false;
 uint32_t wideCapturedAt = 0;
 uint32_t wideLastPollAt = 0;
+
+struct ImuSample {
+  int16_t temperature = 0;
+  int16_t accel[3] = {};
+  int16_t gyro[3] = {};
+  uint32_t sampledAt = 0;
+  bool valid = false;
+};
+ImuSample imuSample;
+uint32_t imuLastPollAt = 0;
+uint16_t imuCalibrationCount = 0;
+float imuGyroSum[3] = {};
+float imuAccelSum[3] = {};
+float imuGyroBias[3] = {};
+float imuGravityReference[3] = {0.0f, 0.0f, 1.0f};
+float imuOrientation[4] = {1.0f, 0.0f, 0.0f, 0.0f}; // body-to-boot-frame quaternion
+bool imuOrientationReady = false;
+uint32_t imuIntegrationAt = 0;
 
 bool i2cPresent(uint8_t address) {
   Wire.beginTransmission(address);
@@ -481,22 +520,65 @@ bool playStartupChime() {
   return true;
 }
 
-bool initNarrowTof(VL53L1X &sensor, uint8_t pinMask,
+VL53L1_Error configureNarrowPhase(VL53L1 &sensor, NarrowTofSample &sample,
+                                  VL53L1_DistanceModes fullMode,
+                                  bool quadrants, bool stopFirst) {
+  VL53L1_Error error = VL53L1_ERROR_NONE;
+  if (stopFirst) {
+    error = sensor.VL53L1_StopMeasurement();
+    if (error != VL53L1_ERROR_NONE) return error;
+  }
+  error = sensor.VL53L1_SetPresetMode(quadrants ?
+    VL53L1_PRESETMODE_MULTIZONES_SCANNING : VL53L1_PRESETMODE_RANGING);
+  if (error != VL53L1_ERROR_NONE) return error;
+  error = sensor.VL53L1_SetDistanceMode(quadrants ?
+    VL53L1_DISTANCEMODE_SHORT : fullMode);
+  if (error != VL53L1_ERROR_NONE) return error;
+  VL53L1_RoiConfig_t roi = {};
+  if (quadrants) {
+    roi.NumberOfRoi = 4;
+    roi.UserRois[0] = {0, 15, 7, 8};  // upper-left SPAD quadrant
+    roi.UserRois[1] = {8, 15, 15, 8}; // upper-right
+    roi.UserRois[2] = {0, 7, 7, 0};   // lower-left
+    roi.UserRois[3] = {8, 7, 15, 0};  // lower-right
+  } else {
+    roi.NumberOfRoi = 1;
+    roi.UserRois[0] = {0, 15, 15, 0}; // full 16x16 SPAD field
+  }
+  error = sensor.VL53L1_SetROI(&roi);
+  if (error != VL53L1_ERROR_NONE) return error;
+  error = sensor.VL53L1_SetOutputMode(VL53L1_OUTPUTMODE_NEAREST);
+  if (error != VL53L1_ERROR_NONE) return error;
+  error = sensor.VL53L1_SetMeasurementTimingBudgetMicroSeconds(
+    quadrants ? 50000 : 100000);
+  if (error != VL53L1_ERROR_NONE) return error;
+  error = sensor.VL53L1_StartMeasurement();
+  if (error == VL53L1_ERROR_NONE) {
+    sample.scanningQuadrants = quadrants;
+    sample.phaseFrames = 0;
+    sample.phaseStartedAt = millis();
+    sample.lastDataAt = sample.phaseStartedAt;
+  }
+  return error;
+}
+
+bool initNarrowTof(VL53L1 &sensor, NarrowTofSample &sample, uint8_t pinMask,
                    uint8_t address, uint8_t *activePins) {
   const uint8_t enabled = 0x08 | *activePins | pinMask;
   if (!writeExpander(0x01, enabled)) return false;
   delay(20);
-  sensor.setBus(&Wire);
-  sensor.setTimeout(500);
-  if (!sensor.init()) {
+  sensor.begin();
+  // The ST CB API takes an 8-bit I2C address; Helm stores 7-bit addresses.
+  const VL53L1_Error initError = sensor.InitSensor(address << 1);
+  if (initError != VL53L1_ERROR_NONE) {
+    Serial.printf("VL53L1CB 0x%02x init error %d\n", address, initError);
     writeExpander(0x01, 0x08 | *activePins);
     return false;
   }
-  sensor.setAddress(address);
-  delay(2);
   if (!i2cPresent(address) ||
-      !sensor.setDistanceMode(VL53L1X::Short) ||
-      !sensor.setMeasurementTimingBudget(50000)) {
+      configureNarrowPhase(sensor, sample, VL53L1_DISTANCEMODE_MEDIUM,
+        false, false) != VL53L1_ERROR_NONE) {
+    Serial.printf("VL53L1CB 0x%02x ranging setup failed\n", address);
     writeExpander(0x01, 0x08 | *activePins);
     return false;
   }
@@ -507,8 +589,8 @@ bool initNarrowTof(VL53L1X &sensor, uint8_t pinMask,
 void initTofSensors() {
   if (!expanderReady) return;
   uint8_t activePins = 0;
-  frontTofReady = initNarrowTof(frontTof, 0x01, FRONT_TOF_ADDRESS, &activePins);
-  rearTofReady = initNarrowTof(rearTof, 0x02, REAR_TOF_ADDRESS, &activePins);
+  frontTofReady = initNarrowTof(frontTof, frontTofSample, 0x01, FRONT_TOF_ADDRESS, &activePins);
+  rearTofReady = initNarrowTof(rearTof, rearTofSample, 0x02, REAR_TOF_ADDRESS, &activePins);
 
   // The wide sensor retains the default address while the two narrow parts
   // stay powered at 0x30/0x31. P2 high + P3 low was confirmed on the bench.
@@ -724,18 +806,135 @@ void sendDiagnostics() {
   diagnosticServer.send(200, "application/json", body);
 }
 
-const char *tofModeName(VL53L1X::DistanceMode mode) {
+const char *tofModeName(VL53L1_DistanceModes mode) {
   switch (mode) {
-    case VL53L1X::Short: return "short";
-    case VL53L1X::Medium: return "medium";
-    case VL53L1X::Long: return "long";
+    case VL53L1_DISTANCEMODE_SHORT: return "short";
+    case VL53L1_DISTANCEMODE_MEDIUM: return "medium";
+    case VL53L1_DISTANCEMODE_LONG: return "long";
     default: return "unknown";
   }
 }
 
-VL53L1X::DistanceMode nextTofMode(VL53L1X::DistanceMode mode) {
-  return mode == VL53L1X::Short ? VL53L1X::Medium :
-    mode == VL53L1X::Medium ? VL53L1X::Long : VL53L1X::Short;
+VL53L1_DistanceModes nextTofMode(VL53L1_DistanceModes mode) {
+  return mode == VL53L1_DISTANCEMODE_SHORT ? VL53L1_DISTANCEMODE_MEDIUM :
+    mode == VL53L1_DISTANCEMODE_MEDIUM ? VL53L1_DISTANCEMODE_LONG :
+    VL53L1_DISTANCEMODE_SHORT;
+}
+
+VL53L1_Error switchNarrowTofMode(VL53L1 &sensor, NarrowTofSample &sample,
+                                 VL53L1_DistanceModes mode) {
+  // A quadrant scan always uses Short; a requested full-field mode takes
+  // effect at the next full-field phase without aborting the current scan.
+  if (sample.scanningQuadrants) return VL53L1_ERROR_NONE;
+  const VL53L1_Error error = configureNarrowPhase(sensor, sample, mode, false, true);
+  if (error == VL53L1_ERROR_NONE) sample.zones[0].hasFrame = false;
+  return error;
+}
+
+bool sameNarrowDistance(uint16_t first, uint16_t second) {
+  const uint32_t difference = first > second ? first - second : second - first;
+  const uint32_t tenth = first / 10;
+  const uint32_t tolerance = tenth > 50 ? tenth : 50;
+  return difference <= tolerance;
+}
+
+void updateNarrowZone(NarrowTofZone &zone, const VL53L1_MultiRangingData_t &results,
+                      bool preferStrongest) {
+  const uint32_t now = millis();
+  zone.targetCount = results.NumberOfObjectsFound < 4 ? results.NumberOfObjectsFound : 4;
+  zone.rangeStatus = -1;
+  zone.distanceMm = 0;
+  zone.signalRate = 0;
+  for (uint8_t i = 0; i < zone.targetCount; ++i) {
+    const auto &target = results.RangeData[i];
+    zone.targets[i] = {target.RangeMilliMeter, target.RangeStatus,
+      target.SignalRateRtnMegaCps};
+    if (zone.rangeStatus == -1) zone.rangeStatus = target.RangeStatus;
+    if (target.RangeStatus != VL53L1_RANGESTATUS_RANGE_VALID ||
+        target.RangeMilliMeter == 0) continue;
+    if (zone.distanceMm == 0 ||
+        (preferStrongest ? target.SignalRateRtnMegaCps > zone.signalRate :
+          target.RangeMilliMeter < zone.distanceMm)) {
+      zone.distanceMm = target.RangeMilliMeter;
+      zone.signalRate = target.SignalRateRtnMegaCps;
+      zone.rangeStatus = target.RangeStatus;
+    }
+  }
+  zone.sampledAt = now;
+  zone.hasFrame = true;
+  if (zone.rangeStatus != VL53L1_RANGESTATUS_RANGE_VALID || zone.distanceMm == 0) {
+    zone.pendingCount = 0;
+    return;
+  }
+  if (zone.hasStable && sameNarrowDistance(zone.stableDistanceMm, zone.distanceMm)) {
+    zone.stableDistanceMm = zone.distanceMm;
+    zone.stableAt = now;
+    zone.pendingCount = 0;
+  } else if (zone.pendingCount > 0 &&
+             sameNarrowDistance(zone.pendingDistanceMm, zone.distanceMm)) {
+    zone.stableDistanceMm = (zone.pendingDistanceMm + zone.distanceMm) / 2;
+    zone.stableAt = now;
+    zone.hasStable = true;
+    zone.pendingCount = 0;
+  } else {
+    zone.pendingDistanceMm = zone.distanceMm;
+    zone.pendingCount = 1;
+  }
+}
+
+void pollNarrowTof(VL53L1 &sensor, bool ready, NarrowTofSample &sample,
+                   VL53L1_DistanceModes &mode, bool automatic,
+                   uint32_t &invalidSince) {
+  if (!ready || millis() - sample.lastPollAt < 40) return;
+  sample.lastPollAt = millis();
+  // An interrupted or misaligned ROI cycle can stop producing fresh frames
+  // while the driver still reports no error. Restart in the full-field phase.
+  if (sample.phaseStartedAt &&
+      (millis() - sample.lastDataAt > 1500 ||
+       millis() - sample.phaseStartedAt > 2500)) {
+    const VL53L1_Error recovery = configureNarrowPhase(sensor, sample, mode, false, true);
+    sample.driverError = recovery;
+    if (sample.recoveryCount < UINT16_MAX) ++sample.recoveryCount;
+    return;
+  }
+  uint8_t dataReady = 0;
+  VL53L1_Error error = sensor.VL53L1_GetMeasurementDataReady(&dataReady);
+  if (error == VL53L1_ERROR_NONE && dataReady) {
+    VL53L1_MultiRangingData_t results = {};
+    error = sensor.VL53L1_GetMultiRangingData(&results);
+    if (error == VL53L1_ERROR_NONE) {
+      sample.lastDataAt = millis();
+      if (sample.phaseFrames < 255) ++sample.phaseFrames;
+      const uint8_t roi = sample.scanningQuadrants ? results.RoiNumber + 1 : 0;
+      const bool warmed = sample.scanningQuadrants ? sample.phaseFrames > 4 :
+        sample.phaseFrames > 1;
+      if (warmed && roi < 5) updateNarrowZone(sample.zones[roi], results, roi == 0);
+    }
+    const bool phaseDone = error == VL53L1_ERROR_NONE &&
+      (sample.scanningQuadrants ?
+        (sample.phaseFrames >= 8 && results.RoiNumber == 3) : sample.phaseFrames >= 2);
+    const VL53L1_Error restart = phaseDone ?
+      configureNarrowPhase(sensor, sample, mode, !sample.scanningQuadrants, true) :
+      sensor.VL53L1_ClearInterruptAndStartMeasurement();
+    if (error == VL53L1_ERROR_NONE) error = restart;
+  }
+  sample.driverError = error;
+  const NarrowTofZone &full = sample.zones[0];
+  const bool valid = full.hasFrame && full.rangeStatus == VL53L1_RANGESTATUS_RANGE_VALID &&
+    full.distanceMm > 0 && millis() - full.sampledAt < 1500 && error == VL53L1_ERROR_NONE;
+  if (!automatic) return;
+  if (valid) {
+    invalidSince = 0;
+  } else if (invalidSince == 0) {
+    invalidSince = millis();
+  } else if (millis() - invalidSince >= TOF_AUTO_RETRY_MS) {
+    const VL53L1_DistanceModes candidate = nextTofMode(mode);
+    if (switchNarrowTofMode(sensor, sample, candidate) == VL53L1_ERROR_NONE) {
+      mode = candidate;
+      sample.modeChanged = true;
+    }
+    invalidSince = millis();
+  }
 }
 
 String tofModesJson() {
@@ -768,10 +967,10 @@ void setTofMode() {
     if (useFront) { frontTofAuto = true; frontTofInvalidSince = 0; }
     if (useRear) { rearTofAuto = true; rearTofInvalidSince = 0; }
   } else {
-    const VL53L1X::DistanceMode selected = mode == "short" ? VL53L1X::Short :
-      mode == "medium" ? VL53L1X::Medium : VL53L1X::Long;
-    if ((useFront && !frontTof.setDistanceMode(selected)) ||
-        (useRear && !rearTof.setDistanceMode(selected))) {
+    const VL53L1_DistanceModes selected = mode == "short" ? VL53L1_DISTANCEMODE_SHORT :
+      mode == "medium" ? VL53L1_DISTANCEMODE_MEDIUM : VL53L1_DISTANCEMODE_LONG;
+    if ((useFront && switchNarrowTofMode(frontTof, frontTofSample, selected) != VL53L1_ERROR_NONE) ||
+        (useRear && switchNarrowTofMode(rearTof, rearTofSample, selected) != VL53L1_ERROR_NONE)) {
       diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"ToF mode switch failed\"}");
       return;
     }
@@ -781,58 +980,70 @@ void setTofMode() {
   diagnosticServer.send(200, "application/json", tofModesJson());
 }
 
-void appendNarrowRange(String &body, const char *name,
-                       VL53L1X &sensor, bool ready,
-                       VL53L1X::DistanceMode &mode, bool automatic,
-                       uint32_t &invalidSince) {
-  bool timedOut = false, valid = false;
-  uint16_t mm = 0;
-  int status = -1;
-  if (ready) {
-    mm = sensor.readSingle();
-    timedOut = sensor.timeoutOccurred();
-    if (!timedOut) {
-      status = static_cast<int>(sensor.ranging_data.range_status);
-      valid = sensor.ranging_data.range_status == VL53L1X::RangeValid;
-    }
-  }
-  const VL53L1X::DistanceMode sampledMode = mode;
-  bool modeChanged = false;
-  if (automatic && ready) {
-    if (valid) {
-      invalidSince = 0;
-    } else if (invalidSince == 0) {
-      invalidSince = millis();
-    } else if (millis() - invalidSince >= TOF_AUTO_RETRY_MS) {
-      const VL53L1X::DistanceMode candidate = nextTofMode(mode);
-      if (sensor.setDistanceMode(candidate)) {
-        mode = candidate;
-        modeChanged = true;
-      }
-      invalidSince = millis();
-    }
-  }
+void appendNarrowRange(String &body, const char *name, bool ready,
+                       VL53L1_DistanceModes mode, bool automatic,
+                       NarrowTofSample &sample) {
+  const NarrowTofZone &full = sample.zones[0];
+  const uint32_t age = full.hasFrame ? millis() - full.sampledAt : 0;
+  const bool timedOut = !full.hasFrame || age >= 2000 || sample.driverError != VL53L1_ERROR_NONE;
+  const bool valid = ready && !timedOut &&
+    full.rangeStatus == VL53L1_RANGESTATUS_RANGE_VALID && full.distanceMm > 0;
   body += "{\"name\":\"" + String(name) + "\",\"ready\":";
   body += ready ? "true" : "false";
   body += ",\"timeout\":";
   body += timedOut ? "true" : "false";
-  body += ",\"rangeStatus\":" + String(status);
-  body += ",\"mode\":\"" + String(tofModeName(sampledMode)) + "\"";
+  body += ",\"rangeStatus\":" + String(full.rangeStatus);
+  body += ",\"mode\":\"" + String(tofModeName(mode)) + "\"";
   body += ",\"activeMode\":\"" + String(tofModeName(mode)) + "\"";
   body += ",\"auto\":" + String(automatic ? "true" : "false");
-  body += ",\"modeChanged\":" + String(modeChanged ? "true" : "false");
+  body += ",\"modeChanged\":" + String(sample.modeChanged ? "true" : "false");
+  body += ",\"ageMs\":" + (full.hasFrame ? String(age) : "null");
+  body += ",\"driverError\":" + String(sample.driverError);
+  body += ",\"recoveryCount\":" + String(sample.recoveryCount);
   body += ",\"distanceMm\":";
-  body += valid ? String(mm) : "null";
+  body += valid ? String(full.distanceMm) : "null";
+  body += ",\"scan\":{\"phase\":\"";
+  body += sample.scanningQuadrants ? "quadrants\"" : "full\"";
+  body += ",\"quadrantMode\":\"short\",\"orientationVerified\":false,\"zones\":[";
+  const char *zoneIds[5] = {"full", "upper-left", "upper-right", "lower-left", "lower-right"};
+  for (uint8_t index = 0; index < 5; ++index) {
+    if (index) body += ',';
+    const NarrowTofZone &zone = sample.zones[index];
+    const uint32_t zoneAge = zone.hasFrame ? millis() - zone.sampledAt : 0;
+    body += "{\"id\":\"" + String(zoneIds[index]) + "\",\"ageMs\":";
+    body += zone.hasFrame ? String(zoneAge) : "null";
+    body += ",\"rangeStatus\":" + String(zone.rangeStatus);
+    body += ",\"distanceMm\":";
+    body += zone.hasFrame && zone.rangeStatus == VL53L1_RANGESTATUS_RANGE_VALID ?
+      String(zone.distanceMm) : "null";
+    body += ",\"stableDistanceMm\":";
+    body += zone.hasStable ? String(zone.stableDistanceMm) : "null";
+    body += ",\"stableAgeMs\":";
+    body += zone.hasStable ? String(millis() - zone.stableAt) : "null";
+    body += ",\"targets\":[";
+    for (uint8_t targetIndex = 0; targetIndex < zone.targetCount; ++targetIndex) {
+      if (targetIndex) body += ',';
+      const NarrowTofTarget &target = zone.targets[targetIndex];
+      body += "{\"distanceMm\":" + String(target.distanceMm);
+      body += ",\"rangeStatus\":" + String(target.rangeStatus);
+      body += ",\"signalMcps\":" + String(target.signalRate / 65536.0f, 2) + '}';
+    }
+    body += "]}";
+  }
+  body += "]}";
   body += '}';
+  sample.modeChanged = false;
 }
 
 void sendRanges() {
-  String body = "{\"ok\":true,\"singleZone\":[";
-  appendNarrowRange(body, "front", frontTof, frontTofReady,
-    frontTofMode, frontTofAuto, frontTofInvalidSince);
+  String body;
+  body.reserve(4500);
+  body = "{\"ok\":true,\"singleZone\":[";
+  appendNarrowRange(body, "front", frontTofReady,
+    frontTofMode, frontTofAuto, frontTofSample);
   body += ',';
-  appendNarrowRange(body, "rear", rearTof, rearTofReady,
-    rearTofMode, rearTofAuto, rearTofInvalidSince);
+  appendNarrowRange(body, "rear", rearTofReady,
+    rearTofMode, rearTofAuto, rearTofSample);
   body += "],\"wideReady\":" + String(wideTofReady ? "true" : "false");
   body += ",\"rssi\":" + String(WiFi.RSSI()) + '}';
   diagnosticServer.send(200, "application/json", body);
@@ -868,50 +1079,198 @@ int16_t signedImuWord(const uint8_t *bytes) {
   return static_cast<int16_t>((static_cast<uint16_t>(bytes[0]) << 8) | bytes[1]);
 }
 
-void sendImu() {
-  // A busy shared I2C bus can make the boot-time configuration check fail.
-  // Allow a fresh initialization when an IMU sample is explicitly requested.
-  if (!imuReady) initImu();
-  if (!imuReady) {
-    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"IMU unavailable\"}");
-    return;
-  }
+void pollImu() {
+  if (!imuReady) return;
+  const uint32_t now = millis();
+  if (now - imuLastPollAt < IMU_SAMPLE_INTERVAL_MS) return;
+  imuLastPollAt = now;
+
   // One burst reads temperature, acceleration and angular rate together.
+  // Keep it in the main loop so diagnostic requests cannot race the I2C bus.
   uint8_t data[14];
-  if (!readRegisters(IMU_ADDRESS, 0x09, data, sizeof(data))) {
-    diagnosticServer.send(502, "application/json", "{\"ok\":false,\"error\":\"IMU read failed\"}");
+  if (!readRegisters(IMU_ADDRESS, 0x09, data, sizeof(data))) return;
+  ImuSample next;
+  next.temperature = signedImuWord(data);
+  float accelG[3], gyroDps[3];
+  for (uint8_t axis = 0; axis < 3; ++axis) {
+    next.accel[axis] = signedImuWord(data + 2 + axis * 2);
+    next.gyro[axis] = signedImuWord(data + 8 + axis * 2);
+    accelG[axis] = next.accel[axis] / 16384.0f;
+    gyroDps[axis] = next.gyro[axis] / 131.0f;
+  }
+  // On this shared I2C bus an occasional burst repeats one byte across
+  // several words (for example 0x1111 or 0xFFFF). Ignore it rather than
+  // treating it as movement and restarting boot calibration.
+  uint8_t repeatedByteWords = 0;
+  for (size_t offset = 0; offset < sizeof(data); offset += 2) {
+    if (data[offset] == data[offset + 1]) ++repeatedByteWords;
+  }
+  if (repeatedByteWords >= 3) return;
+  const float accelNorm = sqrtf(accelG[0] * accelG[0] +
+    accelG[1] * accelG[1] + accelG[2] * accelG[2]);
+  // Occasional I2C bursts have returned -1 on several axes. Such a sample
+  // implies almost zero gravity and must not shift the orientation estimate.
+  if (!isfinite(accelNorm) || accelNorm < 0.25f || accelNorm > 4.0f) return;
+  next.sampledAt = now;
+  next.valid = true;
+  imuSample = next;
+
+  if (!imuOrientationReady) {
+    const float gyroNorm = sqrtf(gyroDps[0] * gyroDps[0] +
+      gyroDps[1] * gyroDps[1] + gyroDps[2] * gyroDps[2]);
+    if (accelNorm < 0.85f || accelNorm > 1.15f || gyroNorm > 5.0f) {
+      imuCalibrationCount = 0;
+      for (uint8_t axis = 0; axis < 3; ++axis) {
+        imuGyroSum[axis] = 0.0f;
+        imuAccelSum[axis] = 0.0f;
+      }
+      return;
+    }
+    for (uint8_t axis = 0; axis < 3; ++axis) {
+      imuGyroSum[axis] += gyroDps[axis];
+      imuAccelSum[axis] += accelG[axis];
+    }
+    if (++imuCalibrationCount < IMU_CALIBRATION_SAMPLES) return;
+    float gravityNorm = 0.0f;
+    for (uint8_t axis = 0; axis < 3; ++axis) {
+      imuGyroBias[axis] = imuGyroSum[axis] / imuCalibrationCount;
+      imuGravityReference[axis] = imuAccelSum[axis] / imuCalibrationCount;
+      gravityNorm += imuGravityReference[axis] * imuGravityReference[axis];
+    }
+    gravityNorm = sqrtf(gravityNorm);
+    for (uint8_t axis = 0; axis < 3; ++axis) imuGravityReference[axis] /= gravityNorm;
+    imuOrientationReady = true;
+    imuIntegrationAt = now;
+    Serial.printf("IMU orientation calibrated from %u stationary samples\n", imuCalibrationCount);
     return;
   }
-  const int16_t temperature = signedImuWord(data);
-  int16_t accel[3], gyro[3];
+
+  const float dt = (now - imuIntegrationAt) / 1000.0f;
+  imuIntegrationAt = now;
+  if (dt <= 0.0f || dt > 0.2f) return; // never integrate across a blind gap
+
+  float omega[3];
   for (uint8_t axis = 0; axis < 3; ++axis) {
-    accel[axis] = signedImuWord(data + 2 + axis * 2);
-    gyro[axis] = signedImuWord(data + 8 + axis * 2);
+    omega[axis] = (gyroDps[axis] - imuGyroBias[axis]) * (PI / 180.0f);
   }
-  String body = "{\"ok\":true,\"sampledAtMs\":" + String(millis());
+  if (accelNorm > 0.7f && accelNorm < 1.3f) {
+    // Predict gravity in the current chip frame by rotating the boot gravity
+    // through the inverse of our body-to-boot orientation quaternion.
+    const float w = imuOrientation[0], x = -imuOrientation[1];
+    const float y = -imuOrientation[2], z = -imuOrientation[3];
+    const float gx = imuGravityReference[0], gy = imuGravityReference[1];
+    const float gz = imuGravityReference[2];
+    const float tx = 2.0f * (y * gz - z * gy);
+    const float ty = 2.0f * (z * gx - x * gz);
+    const float tz = 2.0f * (x * gy - y * gx);
+    const float predicted[3] = {
+      gx + w * tx + y * tz - z * ty,
+      gy + w * ty + z * tx - x * tz,
+      gz + w * tz + x * ty - y * tx,
+    };
+    const float measured[3] = {
+      accelG[0] / accelNorm, accelG[1] / accelNorm, accelG[2] / accelNorm,
+    };
+    omega[0] += IMU_TILT_CORRECTION * (measured[1] * predicted[2] - measured[2] * predicted[1]);
+    omega[1] += IMU_TILT_CORRECTION * (measured[2] * predicted[0] - measured[0] * predicted[2]);
+    omega[2] += IMU_TILT_CORRECTION * (measured[0] * predicted[1] - measured[1] * predicted[0]);
+  }
+  const float w = imuOrientation[0], x = imuOrientation[1];
+  const float y = imuOrientation[2], z = imuOrientation[3];
+  const float halfDt = 0.5f * dt;
+  imuOrientation[0] += halfDt * (-x * omega[0] - y * omega[1] - z * omega[2]);
+  imuOrientation[1] += halfDt * (w * omega[0] + y * omega[2] - z * omega[1]);
+  imuOrientation[2] += halfDt * (w * omega[1] + z * omega[0] - x * omega[2]);
+  imuOrientation[3] += halfDt * (w * omega[2] + x * omega[1] - y * omega[0]);
+  const float qNorm = sqrtf(imuOrientation[0] * imuOrientation[0] +
+    imuOrientation[1] * imuOrientation[1] + imuOrientation[2] * imuOrientation[2] +
+    imuOrientation[3] * imuOrientation[3]);
+  for (uint8_t component = 0; component < 4; ++component) imuOrientation[component] /= qNorm;
+}
+
+void sendImu() {
+  if (!imuReady) initImu();
+  if (!imuReady || !imuSample.valid || millis() - imuSample.sampledAt > 500) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"IMU sample unavailable or stale\"}");
+    return;
+  }
+  String body = "{\"ok\":true,\"sampledAtMs\":" + String(imuSample.sampledAt);
   body += ",\"frame\":\"chip\",\"rawAccel\":[";
   for (uint8_t axis = 0; axis < 3; ++axis) {
     if (axis) body += ',';
-    body += String(accel[axis]);
+    body += String(imuSample.accel[axis]);
   }
   body += "],\"accelG\":[";
   for (uint8_t axis = 0; axis < 3; ++axis) {
     if (axis) body += ',';
-    body += String(accel[axis] / 16384.0f, 4);
+    body += String(imuSample.accel[axis] / 16384.0f, 4);
   }
   body += "],\"rawGyro\":[";
   for (uint8_t axis = 0; axis < 3; ++axis) {
     if (axis) body += ',';
-    body += String(gyro[axis]);
+    body += String(imuSample.gyro[axis]);
   }
   body += "],\"gyroDps\":[";
   for (uint8_t axis = 0; axis < 3; ++axis) {
     if (axis) body += ',';
-    body += String(gyro[axis] / 131.0f, 4);
+    body += String(imuSample.gyro[axis] / 131.0f, 4);
   }
-  body += "],\"rawTemperature\":" + String(temperature);
-  body += ",\"temperatureC\":" + String(25.0f + temperature / 128.0f, 2) + '}';
+  body += "],\"rawTemperature\":" + String(imuSample.temperature);
+  body += ",\"temperatureC\":" + String(25.0f + imuSample.temperature / 128.0f, 2);
+  body += ",\"orientationReady\":" + String(imuOrientationReady ? "true" : "false");
+  body += ",\"calibrationSamples\":" + String(imuCalibrationCount);
+  body += ",\"calibrationTarget\":" + String(IMU_CALIBRATION_SAMPLES);
+  body += ",\"orientationAgeMs\":" + String(millis() - imuIntegrationAt);
+  body += ",\"gyroBiasDps\":[";
+  for (uint8_t axis = 0; axis < 3; ++axis) {
+    if (axis) body += ',';
+    body += String(imuGyroBias[axis], 4);
+  }
+  body += "],\"orientationDeg\":";
+  if (imuOrientationReady) {
+    const float w = imuOrientation[0], x = imuOrientation[1];
+    const float y = imuOrientation[2], z = imuOrientation[3];
+    const float roll = atan2f(2.0f * (w * x + y * z),
+      1.0f - 2.0f * (x * x + y * y));
+    const float sinPitch = 2.0f * (w * y - z * x);
+    const float pitch = asinf(constrain(sinPitch, -1.0f, 1.0f));
+    const float yaw = atan2f(2.0f * (w * z + x * y),
+      1.0f - 2.0f * (y * y + z * z));
+    body += '[';
+    body += String(roll * 180.0f / PI, 2) + ',';
+    body += String(pitch * 180.0f / PI, 2) + ',';
+    body += String(yaw * 180.0f / PI, 2) + ']';
+  } else {
+    body += "null";
+  }
+  body += '}';
   diagnosticServer.send(200, "application/json", body);
+}
+
+void zeroImuOrientation() {
+  if (!imuOrientationReady || !imuSample.valid || millis() - imuSample.sampledAt > 500) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"fresh calibrated IMU sample required\"}");
+    return;
+  }
+  float gravityNorm = 0.0f;
+  float gravity[3];
+  float gyroNormSquared = 0.0f;
+  for (uint8_t axis = 0; axis < 3; ++axis) {
+    gravity[axis] = imuSample.accel[axis] / 16384.0f;
+    gravityNorm += gravity[axis] * gravity[axis];
+    const float rate = imuSample.gyro[axis] / 131.0f - imuGyroBias[axis];
+    gyroNormSquared += rate * rate;
+  }
+  gravityNorm = sqrtf(gravityNorm);
+  if (gravityNorm < 0.85f || gravityNorm > 1.15f || gyroNormSquared > 25.0f) {
+    diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"hold board still to zero orientation\"}");
+    return;
+  }
+  for (uint8_t axis = 0; axis < 3; ++axis) imuGravityReference[axis] = gravity[axis] / gravityNorm;
+  imuOrientation[0] = 1.0f;
+  imuOrientation[1] = imuOrientation[2] = imuOrientation[3] = 0.0f;
+  imuIntegrationAt = millis();
+  diagnosticServer.send(200, "application/json", "{\"ok\":true,\"orientationDeg\":[0,0,0]}");
 }
 
 void sendMicrophoneLevels() {
@@ -1474,6 +1833,211 @@ void setLed() {
   diagnosticServer.send(200, "application/json", "{\"ok\":true}");
 }
 
+String unoJsonEscape(const String &value) {
+  String escaped;
+  escaped.reserve(value.length() + 8);
+  for (size_t index = 0; index < value.length(); ++index) {
+    const char valueChar = value[index];
+    if (valueChar == '"' || valueChar == '\\') escaped += '\\';
+    escaped += valueChar >= 32 && valueChar <= 126 ? valueChar : ' ';
+  }
+  return escaped;
+}
+
+void pollUnoUart() {
+  if (!unoUartReady) return;
+  uint8_t count = 0;
+  while (unoUart.available() && count++ < 96) {
+    const char received = static_cast<char>(unoUart.read());
+    unoLastRxAt = millis();
+    if (received >= 32 && received <= 126) {
+      unoRecentRx += received;
+      if (unoRecentRx.length() > 160) unoRecentRx.remove(0, unoRecentRx.length() - 160);
+    }
+    if (received == '{') unoFrameBuffer = "{";
+    else if (unoFrameBuffer.length() > 0 && received >= 32 && received <= 126) {
+      unoFrameBuffer += received;
+      if (received == '}') {
+        unoLastFrame = unoFrameBuffer;
+        unoFrameBuffer = "";
+      } else if (unoFrameBuffer.length() > 128) {
+        unoFrameBuffer = "";
+      }
+    }
+  }
+}
+
+bool unoRequest(uint8_t command, const String &fields, String &reply, uint32_t timeoutMs = 350) {
+  if (!unoUartReady) return false;
+  pollUnoUart();
+  const String id = "h" + String(++unoRequestId);
+  const String prefix = "{" + id + "_";
+  const String payload = "{\"N\":" + String(command) + fields + ",\"H\":\"" + id + "\"}";
+  unoLastFrame = "";
+  unoUart.print(payload);
+  const uint32_t started = millis();
+  while (millis() - started < timeoutMs) {
+    pollUnoUart();
+    if (unoLastFrame.startsWith(prefix) && unoLastFrame.endsWith("}")) {
+      reply = unoLastFrame.substring(prefix.length(), unoLastFrame.length() - 1);
+      return true;
+    }
+    delay(1);
+  }
+  return false;
+}
+
+bool unoUnsignedReply(const String &reply, uint16_t &value) {
+  if (!reply.length() || reply.length() > 5) return false;
+  uint32_t parsed = 0;
+  for (size_t index = 0; index < reply.length(); ++index) {
+    if (reply[index] < '0' || reply[index] > '9') return false;
+    parsed = parsed * 10 + reply[index] - '0';
+    if (parsed > UINT16_MAX) return false;
+  }
+  value = static_cast<uint16_t>(parsed);
+  return true;
+}
+
+void sendUnoStatus() {
+  pollUnoUart();
+  String body = "{\"ok\":true,\"uartReady\":" + String(unoUartReady ? "true" : "false");
+  body += ",\"baud\":" + String(unoUartBaud);
+  body += ",\"servoCommandVersion\":2";
+  body += ",\"rxPin\":" + String(unoUartRxPin) + ",\"txPin\":" + String(unoUartTxPin);
+  body += ",\"lastRxAgeMs\":" + (unoLastRxAt ? String(millis() - unoLastRxAt) : "null");
+  body += ",\"recentRx\":\"" + unoJsonEscape(unoRecentRx) + "\"}";
+  diagnosticServer.send(200, "application/json", body);
+}
+
+void setUnoBaud() {
+  const uint32_t baud = diagnosticServer.arg("baud").toInt();
+  if (baud != 9600 && baud != 19200 && baud != 38400 && baud != 57600 && baud != 115200) {
+    diagnosticServer.send(400, "application/json", "{\"ok\":false,\"error\":\"unsupported baud\"}");
+    return;
+  }
+  unoUart.end();
+  unoUartBaud = baud;
+  unoUart.begin(unoUartBaud, SERIAL_8N1, unoUartRxPin, unoUartTxPin);
+  unoUartReady = true;
+  unoRecentRx = "";
+  unoFrameBuffer = "";
+  unoLastFrame = "";
+  unoLastRxAt = 0;
+  sendUnoStatus();
+}
+
+void setUnoPins() {
+  const int rx = diagnosticServer.arg("rx").toInt();
+  const int tx = diagnosticServer.arg("tx").toInt();
+  if (!((rx == 43 && tx == 44) || (rx == 44 && tx == 43))) {
+    diagnosticServer.send(400, "application/json",
+      "{\"ok\":false,\"error\":\"use rx=43&tx=44 or rx=44&tx=43\"}");
+    return;
+  }
+  unoUart.end();
+  unoUartRxPin = static_cast<uint8_t>(rx);
+  unoUartTxPin = static_cast<uint8_t>(tx);
+  unoUart.begin(unoUartBaud, SERIAL_8N1, unoUartRxPin, unoUartTxPin);
+  unoUartReady = true;
+  unoRecentRx = "";
+  unoFrameBuffer = "";
+  unoLastFrame = "";
+  unoLastRxAt = 0;
+  sendUnoStatus();
+}
+
+void sendUnoUltrasonic() {
+  String reply;
+  const bool received = unoRequest(21, ",\"D1\":2", reply);
+  uint16_t distanceCm = 0;
+  const bool numeric = received && unoUnsignedReply(reply, distanceCm);
+  if (!numeric) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"Uno ultrasonic reply unavailable\"}");
+    return;
+  }
+  diagnosticServer.send(200, "application/json",
+    "{\"ok\":true,\"distanceCm\":" + String(distanceCm) + "}");
+}
+
+void sendUnoLine() {
+  uint16_t values[3] = {};
+  for (uint8_t index = 0; index < 3; ++index) {
+    String reply;
+    if (!unoRequest(22, ",\"D1\":" + String(index), reply) ||
+        !unoUnsignedReply(reply, values[index])) {
+      diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"Uno line-sensor reply unavailable\"}");
+      return;
+    }
+  }
+  diagnosticServer.send(200, "application/json", "{\"ok\":true,\"raw\":[" +
+    String(values[0]) + ',' + String(values[1]) + ',' + String(values[2]) + "]}");
+}
+
+void setUnoServo() {
+  const int angle = diagnosticServer.arg("angle").toInt();
+  const int channel = diagnosticServer.hasArg("channel") ? diagnosticServer.arg("channel").toInt() : 1;
+  // Do not exceed 90 degrees from the 90-degree center. The stock ELEGOO
+  // sketch imposes tighter limits on each physical servo channel.
+  const int minimum = channel == 2 ? 30 : 10;
+  const int maximum = channel == 2 ? 110 : 170;
+  if ((channel != 1 && channel != 2) || angle < minimum || angle > maximum) {
+    diagnosticServer.send(400, "application/json", "{\"ok\":false,\"error\":\"channel 1 angle 10..170 or channel 2 angle 30..110 required\"}");
+    return;
+  }
+  // ELEGOO N5 takes D2 in degrees, then its sketch divides by ten and
+  // commands the servo in ten-degree increments. Do not multiply here.
+  const int appliedAngle = ((angle + 5) / 10) * 10;
+  String reply;
+  const bool received = unoRequest(5, ",\"D1\":" + String(channel) +
+    ",\"D2\":" + String(appliedAngle), reply, 800);
+  diagnosticServer.send(received ? 200 : 503, "application/json",
+    "{\"ok\":" + String(received ? "true" : "false") + ",\"channel\":" +
+    String(channel) + ",\"angle\":" +
+    String(angle) + ",\"appliedAngle\":" + String(appliedAngle) +
+    ",\"reply\":\"" + unoJsonEscape(reply) + "\"}");
+}
+
+void stopUnoMotors() {
+  String reply;
+  const bool received = unoRequest(110, "", reply, 500);
+  diagnosticServer.send(received ? 200 : 503, "application/json",
+    "{\"ok\":" + String(received ? "true" : "false") +
+    ",\"command\":\"stop\",\"reply\":\"" + unoJsonEscape(reply) + "\"}");
+}
+
+void pulseUnoMotors() {
+  const String direction = diagnosticServer.arg("direction");
+  const int code = direction == "left" ? 1 : direction == "right" ? 2 :
+    direction == "forward" ? 3 : direction == "reverse" ? 4 : 0;
+  const int speed = diagnosticServer.arg("speed").toInt();
+  const int duration = diagnosticServer.arg("ms").toInt();
+  if (!code || speed < 0 || speed > 160 || duration < 100 || duration > 800) {
+    diagnosticServer.send(400, "application/json",
+      "{\"ok\":false,\"error\":\"direction left|right|forward|reverse, speed 0..160, ms 100..800 required\"}");
+    return;
+  }
+  String reply;
+  const bool received = unoRequest(2, ",\"D1\":" + String(code) +
+    ",\"D2\":" + String(speed) + ",\"T\":" + String(duration), reply, duration + 500);
+  String stopReply;
+  const bool stopped = unoRequest(110, "", stopReply, 500);
+  diagnosticServer.send(received && stopped ? 200 : 503, "application/json",
+    "{\"ok\":" + String(received && stopped ? "true" : "false") +
+    ",\"direction\":\"" + direction + "\",\"speed\":" + String(speed) +
+    ",\"durationMs\":" + String(duration) + ",\"timedReply\":\"" +
+    unoJsonEscape(reply) + "\",\"stopReply\":\"" + unoJsonEscape(stopReply) + "\"}");
+}
+
+void turnUnoRgbOff() {
+  String reply;
+  const bool received = unoRequest(8,
+    ",\"D1\":0,\"D2\":0,\"D3\":0,\"D4\":0", reply, 500);
+  diagnosticServer.send(received ? 200 : 503, "application/json",
+    "{\"ok\":" + String(received ? "true" : "false") +
+    ",\"target\":\"Uno shield RGB LED only\",\"reply\":\"" + unoJsonEscape(reply) + "\"}");
+}
+
 void setup() {
   Serial.begin(115200);
   bootMs = millis();
@@ -1508,6 +2072,7 @@ void setup() {
   diagnosticServer.on("/tof-mode", HTTP_POST, setTofMode);
   diagnosticServer.on("/wide-range", HTTP_GET, sendWideRange);
   diagnosticServer.on("/imu", HTTP_GET, sendImu);
+  diagnosticServer.on("/imu/zero", HTTP_POST, zeroImuOrientation);
   diagnosticServer.on("/mic-levels", HTTP_GET, sendMicrophoneLevels);
   diagnosticServer.on("/mic-pin-test", HTTP_GET, sendMicrophonePinTest);
   diagnosticServer.on("/mic-live-pull-test", HTTP_GET, sendMicrophoneLivePullTest);
@@ -1524,12 +2089,34 @@ void setup() {
   diagnosticServer.on("/startup-sequence", HTTP_POST, sendStartupSequence);
   diagnosticServer.on("/speaker-pcm", HTTP_POST, sendSpeakerPcm, receiveSpeakerPcm);
   diagnosticServer.on("/led", HTTP_GET, setLed);
+  diagnosticServer.on("/uno/status", HTTP_GET, sendUnoStatus);
+  diagnosticServer.on("/uno/baud", HTTP_POST, setUnoBaud);
+  diagnosticServer.on("/uno/pins", HTTP_POST, setUnoPins);
+  diagnosticServer.on("/uno/ultrasonic", HTTP_GET, sendUnoUltrasonic);
+  diagnosticServer.on("/uno/line", HTTP_GET, sendUnoLine);
+  diagnosticServer.on("/uno/servo", HTTP_POST, setUnoServo);
+  diagnosticServer.on("/uno/motor-pulse", HTTP_POST, pulseUnoMotors);
+  diagnosticServer.on("/uno/stop", HTTP_POST, stopUnoMotors);
+  diagnosticServer.on("/uno/rgb-off", HTTP_POST, turnUnoRgbOff);
   diagnosticServer.begin();
   Serial.printf("Camera port %u, diagnostics port %u\n", CAMERA_PORT, DIAGNOSTIC_PORT);
+  // GPIO43/44 are also the ESP32-S3's default UART0 console pins. Release
+  // them before assigning UART1 to the ELEGOO shield's 9600-baud link.
+  Serial.flush();
+  Serial.end();
+  unoUart.setRxBufferSize(512);
+  unoUart.begin(unoUartBaud, SERIAL_8N1, unoUartRxPin, unoUartTxPin);
+  unoUartReady = true;
 }
 
 void loop() {
   diagnosticServer.handleClient();
+  pollUnoUart();
+  pollNarrowTof(frontTof, frontTofReady, frontTofSample,
+    frontTofMode, frontTofAuto, frontTofInvalidSince);
+  pollNarrowTof(rearTof, rearTofReady, rearTofSample,
+    rearTofMode, rearTofAuto, rearTofInvalidSince);
+  pollImu();
   if (wideTofReady && millis() - wideLastPollAt >= 40) {
     wideLastPollAt = millis();
     if (wideTof.isDataReady() && wideTof.getRangingData(&wideResults)) {

@@ -24,6 +24,9 @@ ground-skidsteer-esp32/
 them into the staged Arduino sketch directory before compiling. Names must be
 plain filenames, not paths. The Sensor Board v1.3 template uses this for its
 boot-chime PCM header.
+If a template has a `src/` directory, Helm also copies that tree into the
+staged sketch. Arduino compiles source files recursively beneath `src/`; the
+Sensor Board v1.3 template uses this for its bundled VL53L1CB driver.
 
 ## BMOC integration
 

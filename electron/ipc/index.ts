@@ -340,7 +340,8 @@ export function registerIpcHandlers(opts: { version: string }): void {
     }
     const routes: Record<SensorBoardUnoRequest["action"], string> = {
       status: "/uno/status", ultrasonic: "/uno/ultrasonic", line: "/uno/line",
-      servo: "/uno/servo", motor: "/uno/motor-pulse", stop: "/uno/stop",
+      servo: "/uno/servo", motor: "/uno/motor-pulse", drive: "/uno/drive",
+      stop: "/uno/stop", "drive-stop": "/uno/drive-stop",
       "rgb-off": "/uno/rgb-off", baud: "/uno/baud",
     };
     const route = routes[req.action];
@@ -349,7 +350,7 @@ export function registerIpcHandlers(opts: { version: string }): void {
     url.port = "82";
     url.pathname = route;
     url.search = "";
-    if (req.action === "motor") {
+    if (req.action === "motor" || req.action === "drive") {
       if (!["left", "right", "forward", "reverse"].includes(req.direction ?? "") ||
           !Number.isInteger(req.speed) || req.speed! < 0 || req.speed! > 160 ||
           !Number.isInteger(req.ms) || req.ms! < 100 || req.ms! > 800) {

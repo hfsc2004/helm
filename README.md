@@ -442,8 +442,12 @@ not implemented. See the [template notes](firmware/templates/sensor-board-v1-3-e
 for limits and test endpoints; raw ToF ranges are not collision decisions.
 
 The v1.3 bring-up board is a **single-board camera/sensor vehicle**, not a
-sidecar requiring a second drive ESP32. Helm does not show motor controls or
-poll `/telemetry` for this revision until drive firmware exists. If `.local`
+sidecar requiring a second drive ESP32. Helm does not show the older drive
+keypad or poll `/telemetry` for this revision. With the updated sensor-board
+firmware, the Drive tab accepts the selected WASD or NumPad keyboard mode
+through the ELEGOO Uno's bounded motor commands, without adding an on-screen
+keypad. The Uno return path is still unverified, so an ESP UART write is not
+proof that the Uno executed a particular command. If `.local`
 resolution is unreliable on your network, set the vehicle camera URL in the
 Vehicles tab to the board's current IP and port 81; a DHCP lease change may
 require updating that URL again.
@@ -545,7 +549,7 @@ Working end-to-end on Linux x64:
 - ✅ **Configure-and-flash from the UI**: click a detected board → pick a template → fill in Wi-Fi / camera params → flash with live arduino-cli output
 - ✅ **PSF Sensor Board revision setting** per vehicle (v1.1 or v1.3) and v1.3 ESP32-S3-CAM bench bring-up template; front/rear ToF ranging, raw 8×8 depth frames, IMU samples, RGBW LEDs, and speaker playback have been hardware-tested. Microphone audio and collision-control integration remain follow-up work
 - ✅ **Live v1.3 sensor readouts in Drive** — front/rear VL53L1CB full-field and four-quadrant scans, raw 8×8 VL53L5CX ToF map with an approximate front-quadrant overlay, chip-frame acceleration/gyro, Wi-Fi RSSI, and IMU die temperature. Each narrow region retains its last confirmed distance with an age/stale indication. The overlay is uncalibrated and does not imply pixel alignment. An agent-facing `vehicle-tof-mode` CLI controls the full-field Short/Medium/Long mode; quadrants scan in Short mode. Automatic fallback tries another full-field mode after persistent invalid returns. No v1.3 motor controls are implied.
-- 🧪 **ELEGOO Uno V4 UART bring-up for v1.3** — prepared firmware and Helm tests for the stock 9600-baud serial protocol: passive UART status, ultrasonic and line readings, servo positions, bounded left/right-pair motor pulses, stop, and shield RGB-off. Hardware wiring and installed Uno sketch are not yet confirmed; do not treat an initialized UART as a successful Uno connection. A power indicator LED is not software-controlled by the RGB command.
+- 🧪 **ELEGOO Uno V4 UART bring-up for v1.3** — GPIO43-to-Uno commands have been verified by shield RGB-off and reverse motor motion. Helm offers keyboard-only, bounded Uno driving and sends RGB-off automatically after ESP startup. The Uno-to-GPIO44 return path remains silent, so ultrasonic and line queries do not yet provide readings. The startup RGB-off sequence does not alter the Uno's own power-on firmware.
 - ✅ **Boot-relative v1.3 orientation** — roll, pitch, and yaw are zeroed after stationary startup calibration and tracked on the board between Helm polls. Agents can re-zero a stationary pose with `vehicle-imu-zero`; yaw can drift without a compass.
 - ✅ **mDNS discovery** — drive boards advertise as `<name>.local` so DHCP IP changes don't break the connection; the host-side HTTP layer translates `ENOTFOUND` on `.local` names into "install Avahi (Linux) or Bonjour (Windows)" instead of a raw DNS error
 - ✅ **Host-side Wi-Fi scan** in the flash wizard — SSID dropdown lists networks the host sees (Linux/`nmcli` today, macOS/Windows fall back to text input), filtered to the bands the target board's radio can actually join (no 5GHz networks offered for an ESP32)

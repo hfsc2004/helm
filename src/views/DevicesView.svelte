@@ -9,7 +9,10 @@
   import type { OllamaStatus } from "@shared/llm";
   import { devicesScreen, openConfigure } from "../stores/devices-view";
   import { INPUT_MODE_LABELS, inputMode, type InputMode } from "../stores/inputMode";
+  import { fleet } from "../stores/vehicles";
   import ConfigureBoardView from "./ConfigureBoardView.svelte";
+
+  $: selectedIsUno = $fleet.vehicles.find((vehicle) => vehicle.id === $fleet.selectedId)?.sensorBoardRevision === "1.3";
 
   // Gamepad detection — polled while the Devices tab is open so the status
   // reflects "plug in now" without forcing the user to switch views.
@@ -150,14 +153,17 @@
       {#if $inputMode === "wasd"}
         <p class="muted small">
           W/A/S/D for cardinals, Q/E/Z/C for diagonals (all hold-drive).
-          R = CW 180°, X = stop.
+          {#if selectedIsUno}X or Space = stop. The v1.3 Uno has no calibrated 180° turn yet.{:else}R = CW 180°, X = stop.{/if}
         </p>
       {:else if $inputMode === "numpad"}
         <p class="muted small">
-          Numpad 8/4/2/6 (& 7/9/1/3) hold-drive. 5 = CW 180°, 0 = stop.
+          Numpad 8/4/2/6 (& 7/9/1/3) hold-drive. {#if selectedIsUno}0 or Space = stop; 5 is not mapped yet.{:else}5 = CW 180°, 0 = stop.{/if}
           Digit row 0–9 works too.
         </p>
       {:else if $inputMode === "gamepad"}
+        {#if selectedIsUno}
+          <p class="muted small">The v1.3 Uno currently supports keyboard driving only. Select WASD or NumPad.</p>
+        {:else}
         <p class="muted small">
           Left stick drives (tank mix). South button (A / X) = stop,
           North button (Y / △) = CW 180°.
@@ -172,6 +178,7 @@
             <span class="dot"></span>
             No controller detected. Plug one in and press any button to wake it.
           </p>
+        {/if}
         {/if}
       {/if}
     </section>

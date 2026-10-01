@@ -5,6 +5,29 @@ All notable changes to PSF Helm will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.8] - 2026-10-01
+
+### Added
+- Add keyboard-only WASD and NumPad driving for Sensor Board v1.3 through the
+  ELEGOO Uno. Bounded motor pulses are refreshed while a key is held; key
+  release, Space, and focus loss send stop. No on-screen keypad is added.
+- Add nonblocking Uno drive/stop endpoints with the Uno's timed motor command
+  and an independent ESP-side stop deadline. Report UART writes separately
+  from Uno acknowledgments, which are not yet received.
+- Have the ESP send Uno stop/clear and shield RGB-off after startup, with a few
+  bounded retries. This does not change the Uno's own power-on firmware.
+
+### Fixed
+- Correct the Sensor Board v1.3 Uno UART default: ESP GPIO43 transmits to Uno
+  RX; divided Uno TX reaches ESP GPIO44 RX. Preserve the Freenove camera's
+  tested horizontal mirror setting and expose a live mirror toggle.
+
+### Known issues
+- The Uno acts on LED and motor commands but ESP GPIO44 has received no reply
+  bytes, so ultrasonic and line-sensor queries remain unavailable. A separate
+  Uno-only reset may relight the shield RGB LED until the ESP is restarted or
+  the RGB-off command is sent again. Microphone capture remains unresolved.
+
 ## [0.3.7] - 2026-09-26
 
 ### Added

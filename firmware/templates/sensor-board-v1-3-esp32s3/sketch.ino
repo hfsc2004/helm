@@ -32,6 +32,7 @@ static const IPAddress STATIC_IP({{wifi.staticIp.octets}});
 static const int STATIC_CIDR = {{wifi.staticCidr}};
 static const char *FRAME_SIZE = "{{camera.frameSize}}";
 static const int JPEG_QUALITY = {{camera.jpegQuality}};
+static const bool CAMERA_MIRROR_DEFAULT = {{camera.hmirror}};
 
 static constexpr uint8_t I2C_SDA = 2;
 static constexpr uint8_t I2C_SCL = 1;
@@ -72,9 +73,12 @@ static constexpr uint8_t LED_PIN = 48;
 static constexpr uint8_t LED_COUNT = 3;
 static constexpr uint8_t CAMERA_PORT = 81;
 static constexpr uint8_t DIAGNOSTIC_PORT = 82;
-static constexpr uint8_t UNO_UART_DEFAULT_RX = 43;
-static constexpr uint8_t UNO_UART_DEFAULT_TX = 44;
+// Uno TX reaches GPIO44 through the 5 V-to-3.3 V divider; GPIO43 drives Uno RX.
+static constexpr uint8_t UNO_UART_DEFAULT_RX = 44;
+static constexpr uint8_t UNO_UART_DEFAULT_TX = 43;
 static constexpr uint32_t UNO_UART_DEFAULT_BAUD = 9600;
+static constexpr const char *UNO_RGB_OFF_FIELDS =
+  ",\"D1\":0,\"D2\":0,\"D3\":0,\"D4\":0";
 
 // GOOUUU ESP32-S3-CAM pin map; matches Espressif's BOARD_ESP32S3_GOOUUU.
 // GPIO4 is camera SCCB data. The board's IR strobe switch must stay in its
@@ -87,6 +91,7 @@ static constexpr int CAM_VSYNC = 6, CAM_HREF = 7, CAM_PCLK = 13;
 WebServer cameraServer(CAMERA_PORT);
 WebServer diagnosticServer(DIAGNOSTIC_PORT);
 bool cameraReady = false;
+bool cameraMirrored = false;
 bool expanderReady = false;
 bool ledsReady = false;
 bool frontTofReady = false;
@@ -127,6 +132,10 @@ uint16_t unoRequestId = 0;
 String unoRecentRx;
 String unoFrameBuffer;
 String unoLastFrame;
+bool unoDriveActive = false;
+uint32_t unoDriveDeadline = 0;
+uint8_t unoStartupLedClearsRemaining = 0;
+uint32_t unoStartupLedNextAt = 0;
 struct SpeakerPcmChunk {
   uint16_t size;
   uint8_t data[SPEAKER_CHUNK_BYTES];
@@ -637,8 +646,18 @@ bool initCamera() {
   c.fb_location = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
   c.grab_mode = CAMERA_GRAB_LATEST;
   const esp_err_t err = esp_camera_init(&c);
-  if (err != ESP_OK) Serial.printf("Camera init failed: 0x%x\n", err);
-  return err == ESP_OK;
+  if (err != ESP_OK) {
+    Serial.printf("Camera init failed: 0x%x\n", err);
+    return false;
+  }
+  sensor_t *sensor = esp_camera_sensor_get();
+  if (sensor && sensor->set_hmirror &&
+      sensor->set_hmirror(sensor, CAMERA_MIRROR_DEFAULT ? 1 : 0) == 0) {
+    cameraMirrored = CAMERA_MIRROR_DEFAULT;
+  } else {
+    Serial.println("Camera horizontal mirror setting failed");
+  }
+  return true;
 }
 
 IPAddress subnetMask(int cidr) {
@@ -675,8 +694,9 @@ void connectWifi() {
 
 void sendHealth() {
   String body = "{\"ok\":true,\"board\":\"psf-sensor-board\",\"revision\":\"1.3\"";
-  body += ",\"firmware\":\"bring-up-10\",\"uptimeMs\":" + String(millis() - bootMs);
+  body += ",\"firmware\":\"bring-up-11\",\"uptimeMs\":" + String(millis() - bootMs);
   body += ",\"cameraReady\":" + String(cameraReady ? "true" : "false");
+  body += ",\"cameraMirrored\":" + String(cameraMirrored ? "true" : "false");
   body += ",\"expanderReady\":" + String(expanderReady ? "true" : "false");
   body += ",\"frontTofReady\":" + String(frontTofReady ? "true" : "false");
   body += ",\"rearTofReady\":" + String(rearTofReady ? "true" : "false");
@@ -804,6 +824,26 @@ void sendDiagnostics() {
   body += ",\"imuAddressResponds\":" + String((i2cPresent(0x68) || i2cPresent(0x69)) ? "true" : "false");
   body += ",\"distanceMm\":null,\"imuSample\":null}";
   diagnosticServer.send(200, "application/json", body);
+}
+
+void setCameraMirror() {
+  const String enabled = diagnosticServer.arg("enabled");
+  if (enabled != "0" && enabled != "1") {
+    diagnosticServer.send(400, "application/json",
+      "{\"ok\":false,\"error\":\"enabled must be 0 or 1\"}");
+    return;
+  }
+  sensor_t *sensor = cameraReady ? esp_camera_sensor_get() : nullptr;
+  if (!sensor || !sensor->set_hmirror ||
+      sensor->set_hmirror(sensor, enabled == "1" ? 1 : 0) != 0) {
+    diagnosticServer.send(503, "application/json",
+      "{\"ok\":false,\"error\":\"camera mirror control unavailable\"}");
+    return;
+  }
+  cameraMirrored = enabled == "1";
+  diagnosticServer.send(200, "application/json",
+    "{\"ok\":true,\"cameraMirrored\":" +
+    String(cameraMirrored ? "true" : "false") + "}");
 }
 
 const char *tofModeName(VL53L1_DistanceModes mode) {
@@ -1887,6 +1927,34 @@ bool unoRequest(uint8_t command, const String &fields, String &reply, uint32_t t
   return false;
 }
 
+bool unoSendWithoutReply(uint8_t command, const String &fields = "") {
+  if (!unoUartReady) return false;
+  const String id = "h" + String(++unoRequestId);
+  const String payload = "{\"N\":" + String(command) + fields + ",\"H\":\"" + id + "\"}";
+  return unoUart.print(payload) == payload.length();
+}
+
+void pollUnoDriveDeadline() {
+  if (!unoDriveActive || static_cast<int32_t>(millis() - unoDriveDeadline) < 0) return;
+  unoDriveActive = false;
+  // The Uno's N2 timer is the primary bound. This is an independent ESP-side
+  // stop in case its timer or parser does not behave as expected.
+  unoSendWithoutReply(110);
+}
+
+void pollUnoStartupLedClear() {
+  if (!unoUartReady || !unoStartupLedClearsRemaining || unoDriveActive ||
+      static_cast<int32_t>(millis() - unoStartupLedNextAt) < 0) return;
+  // The Uno's stock sketch powers up with its shield LED on. It does not
+  // persist the off state, so clear it after both boards have booted. A few
+  // bounded retries cover either board starting first without continuously
+  // overriding later user-selected Uno modes.
+  unoSendWithoutReply(110);
+  unoSendWithoutReply(8, UNO_RGB_OFF_FIELDS);
+  --unoStartupLedClearsRemaining;
+  unoStartupLedNextAt = millis() + 1000;
+}
+
 bool unoUnsignedReply(const String &reply, uint16_t &value) {
   if (!reply.length() || reply.length() > 5) return false;
   uint32_t parsed = 0;
@@ -1904,6 +1972,7 @@ void sendUnoStatus() {
   String body = "{\"ok\":true,\"uartReady\":" + String(unoUartReady ? "true" : "false");
   body += ",\"baud\":" + String(unoUartBaud);
   body += ",\"servoCommandVersion\":2";
+  body += ",\"driveCommandVersion\":1";
   body += ",\"rxPin\":" + String(unoUartRxPin) + ",\"txPin\":" + String(unoUartTxPin);
   body += ",\"lastRxAgeMs\":" + (unoLastRxAt ? String(millis() - unoLastRxAt) : "null");
   body += ",\"recentRx\":\"" + unoJsonEscape(unoRecentRx) + "\"}";
@@ -1999,6 +2068,7 @@ void setUnoServo() {
 }
 
 void stopUnoMotors() {
+  unoDriveActive = false;
   String reply;
   const bool received = unoRequest(110, "", reply, 500);
   diagnosticServer.send(received ? 200 : 503, "application/json",
@@ -2017,6 +2087,7 @@ void pulseUnoMotors() {
       "{\"ok\":false,\"error\":\"direction left|right|forward|reverse, speed 0..160, ms 100..800 required\"}");
     return;
   }
+  unoDriveActive = false;
   String reply;
   const bool received = unoRequest(2, ",\"D1\":" + String(code) +
     ",\"D2\":" + String(speed) + ",\"T\":" + String(duration), reply, duration + 500);
@@ -2029,10 +2100,44 @@ void pulseUnoMotors() {
     unoJsonEscape(reply) + "\",\"stopReply\":\"" + unoJsonEscape(stopReply) + "\"}");
 }
 
+void driveUnoMotors() {
+  const String direction = diagnosticServer.arg("direction");
+  const int code = direction == "left" ? 1 : direction == "right" ? 2 :
+    direction == "forward" ? 3 : direction == "reverse" ? 4 : 0;
+  const int speed = diagnosticServer.arg("speed").toInt();
+  const int duration = diagnosticServer.arg("ms").toInt();
+  if (!code || speed < 0 || speed > 160 || duration < 100 || duration > 800) {
+    diagnosticServer.send(400, "application/json",
+      "{\"ok\":false,\"error\":\"direction left|right|forward|reverse, speed 0..160, ms 100..800 required\"}");
+    return;
+  }
+  const bool sent = unoSendWithoutReply(2, ",\"D1\":" + String(code) +
+    ",\"D2\":" + String(speed) + ",\"T\":" + String(duration));
+  if (!sent) {
+    unoDriveActive = false;
+    diagnosticServer.send(503, "application/json",
+      "{\"ok\":false,\"error\":\"ESP UART write failed\"}");
+    return;
+  }
+  unoDriveDeadline = millis() + duration;
+  unoDriveActive = true;
+  diagnosticServer.send(200, "application/json",
+    "{\"ok\":true,\"sent\":true,\"unoAcknowledged\":false,\"direction\":\"" +
+    direction + "\",\"speed\":" + String(speed) + ",\"durationMs\":" + String(duration) + "}");
+}
+
+void stopUnoDrive() {
+  unoDriveActive = false;
+  const bool sent = unoSendWithoutReply(110);
+  diagnosticServer.send(sent ? 200 : 503, "application/json",
+    "{\"ok\":" + String(sent ? "true" : "false") +
+    ",\"sent\":" + String(sent ? "true" : "false") +
+    ",\"unoAcknowledged\":false,\"command\":\"stop\"}");
+}
+
 void turnUnoRgbOff() {
   String reply;
-  const bool received = unoRequest(8,
-    ",\"D1\":0,\"D2\":0,\"D3\":0,\"D4\":0", reply, 500);
+  const bool received = unoRequest(8, UNO_RGB_OFF_FIELDS, reply, 500);
   diagnosticServer.send(received ? 200 : 503, "application/json",
     "{\"ok\":" + String(received ? "true" : "false") +
     ",\"target\":\"Uno shield RGB LED only\",\"reply\":\"" + unoJsonEscape(reply) + "\"}");
@@ -2067,6 +2172,7 @@ void setup() {
   initSpeaker();
 
   diagnosticServer.on("/diagnostics", HTTP_GET, sendDiagnostics);
+  diagnosticServer.on("/camera/mirror", HTTP_POST, setCameraMirror);
   diagnosticServer.on("/ranges", HTTP_GET, sendRanges);
   diagnosticServer.on("/tof-mode", HTTP_GET, sendTofMode);
   diagnosticServer.on("/tof-mode", HTTP_POST, setTofMode);
@@ -2096,6 +2202,8 @@ void setup() {
   diagnosticServer.on("/uno/line", HTTP_GET, sendUnoLine);
   diagnosticServer.on("/uno/servo", HTTP_POST, setUnoServo);
   diagnosticServer.on("/uno/motor-pulse", HTTP_POST, pulseUnoMotors);
+  diagnosticServer.on("/uno/drive", HTTP_POST, driveUnoMotors);
+  diagnosticServer.on("/uno/drive-stop", HTTP_POST, stopUnoDrive);
   diagnosticServer.on("/uno/stop", HTTP_POST, stopUnoMotors);
   diagnosticServer.on("/uno/rgb-off", HTTP_POST, turnUnoRgbOff);
   diagnosticServer.begin();
@@ -2107,10 +2215,14 @@ void setup() {
   unoUart.setRxBufferSize(512);
   unoUart.begin(unoUartBaud, SERIAL_8N1, unoUartRxPin, unoUartTxPin);
   unoUartReady = true;
+  unoStartupLedClearsRemaining = 3;
+  unoStartupLedNextAt = millis() + 200;
 }
 
 void loop() {
   diagnosticServer.handleClient();
+  pollUnoDriveDeadline();
+  pollUnoStartupLedClear();
   pollUnoUart();
   pollNarrowTof(frontTof, frontTofReady, frontTofSample,
     frontTofMode, frontTofAuto, frontTofInvalidSince);

@@ -19,6 +19,7 @@
     { "key": "wifi.staticIp", "type": "string", "default": "192.168.1.51", "label": "Static IP" },
     { "key": "wifi.staticCidr", "type": "number", "default": 24, "label": "Static CIDR prefix (0-32)" },
     { "key": "camera.frameSize", "type": "string", "default": "VGA", "label": "Camera frame size (QVGA | VGA | SVGA | XGA | HD)" },
-    { "key": "camera.jpegQuality", "type": "number", "default": 12, "label": "JPEG quality (0..63, lower is better)" }
+    { "key": "camera.jpegQuality", "type": "number", "default": 12, "label": "JPEG quality (0..63, lower is better)" },
+    { "key": "camera.hmirror", "type": "boolean", "default": false, "label": "Mirror camera horizontally" }
   ]
 }

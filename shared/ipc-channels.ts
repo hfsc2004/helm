@@ -74,7 +74,7 @@ export interface SensorBoardSnapshotRequest {
 
 export interface SensorBoardUnoRequest {
   vehicleId: string;
-  action: "status" | "ultrasonic" | "line" | "servo" | "motor" | "stop" | "rgb-off" | "baud";
+  action: "status" | "ultrasonic" | "line" | "servo" | "motor" | "drive" | "stop" | "drive-stop" | "rgb-off" | "baud";
   direction?: "left" | "right" | "forward" | "reverse";
   speed?: number;
   ms?: number;

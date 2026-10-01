@@ -9,14 +9,23 @@ for this v1.3 bring-up configuration.
 ## Implemented
 
 - Camera on port 81: `GET /health`, `GET /capture`, `GET /stream`.
-- ELEGOO Smart Robot Car V4.0 Uno UART bridge on port 82 (unverified on the
-  mounted hardware): GPIO43 receives, GPIO44 transmits, initially at 9600 baud.
+  The optional `camera.hmirror` flash setting applies the camera sensor's
+  horizontal mirror control at boot. Port 82 also provides
+  `POST /camera/mirror?enabled=0|1` for a live orientation check without
+  reflashing; `/health` reports the applied `cameraMirrored` state. The
+  Freenove replacement camera currently needs this setting enabled, while
+  the original GOOUUU camera used the default (disabled).
+- ELEGOO Smart Robot Car V4.0 Uno UART bridge on port 82: GPIO44 receives
+  Uno TX through the 5 V-to-3.3 V divider, while GPIO43 transmits to Uno RX,
+  at 9600 baud.
+  On mounted hardware, the Uno has acted on RGB-off and reverse motor commands,
+  but the ESP has received no reply bytes; Uno TX / ESP RX remains unresolved.
   The ESP releases its UART0 debug console before attaching UART1 to those
   pins. `GET /uno/status` is passive; `POST /uno/baud?baud=9600|19200|38400|57600|115200`
-  changes the listening speed at runtime. For UART bring-up, `POST /uno/pins?rx=43&tx=44`
-  or `rx=44&tx=43` reverses the ESP pin roles without another flash; boot
-  defaults to the assembled-board RX43/TX44 mapping. The older pinout text
-  lists the opposite direction and needs reconciliation with the physical PCB.
+  changes the listening speed at runtime. For UART bring-up, `POST /uno/pins?rx=44&tx=43`
+  restores the default ESP pin roles without another flash; boot defaults to
+  RX44/TX43, matching the traced TX/RX wiring and voltage divider. Earlier
+  firmware builds mistakenly booted with RX43/TX44.
   `GET /uno/ultrasonic` sends ELEGOO
   `N21,D1=2`; `GET /uno/line` sends `N22,D1=0..2` for left/middle/right.
   `POST /uno/servo?channel=1|2&angle=...` sends `N5` to servo 1 (D10,
@@ -26,12 +35,22 @@ for this v1.3 bring-up configuration.
   `POST /uno/motor-pulse?direction=left|right|forward|reverse&speed=0..160&ms=100..800`
   sends the stock firmware's timed `N2` command, waits for completion, then
   sends `N110` stop; `POST /uno/stop` sends the same stop immediately. The
-  four physical motors are wired as left and right pairs by the ELEGOO shield,
+  keyboard-only Drive view uses `POST /uno/drive` with the same bounded speed
+  and duration, and `POST /uno/drive-stop`. These return promptly after the
+  ESP writes to UART, so holding a key can refresh an Uno-timed pulse; a local
+  ESP timer also sends `N110` when pulses cease. `sent: true` does not mean
+  the Uno acknowledged the command. The Drive view checks
+  `driveCommandVersion: 1` from `GET /uno/status` before enabling the keys.
+  No on-screen keypad is added for v1.3. The four physical motors are wired
+  as left and right pairs by the ELEGOO shield,
   not individually addressable wheels. `POST /uno/rgb-off` sends `N8` with
-  zero RGB values; it does not control a hardwired Uno power LED. No UART
-  command is sent automatically at boot. These commands assume the stock
-  ELEGOO V4 serial protocol; a different Uno sketch may not respond. Test
-  the UART wiring and Uno firmware before using the motor endpoint.
+  zero RGB values; it does not control a hardwired Uno power LED. After the
+  ESP boots, it sends Uno stop/clear and shield RGB-off three times, one
+  second apart, to cover boot-order differences. This is not a persistent
+  change to the Uno: an independent Uno-only reset can relight the LED until
+  the command is sent again or the ESP restarts. These commands assume the
+  stock ELEGOO V4 serial protocol; a different Uno sketch may not respond.
+  Do not treat the silent Uno return path as valid distance telemetry.
 - Diagnostics on port 82: `GET /diagnostics` lists I²C addresses, reads back
   the TCA9534 output/configuration registers, and reports whether the ToF
   default address and IMU address respond. The expander is initialized after
@@ -307,14 +326,16 @@ cache should be used for simultaneous UI and CLI viewing.
 ## Build and bench use
 
 The template appears in Helm's ESP32-S3 Configure Board list as
-**GSN Robotics - PSF Sensor Board v1.3 (bring-up)**. Its GOOUUU camera pin
-map is fixed by this PCB; do not select an unrelated pin profile. The board's
-own USB-C socket is power-only. Use the ESP32-S3-CAM module's programming
-connector for flashing, after confirming the module and serial port.
+**GSN Robotics - PSF Sensor Board v1.3 (bring-up)**. The camera pin map matches
+the tested GOOUUU and Freenove ESP32-S3-CAM modules; do not select an unrelated
+pin profile. The Sensor Board's own USB-C socket is power-only. Use the
+ESP32-S3-CAM module's programming connector for flashing, after confirming
+the module and serial port.
 
 The default FQBN is `esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=no_ota`,
-targeting the photographed GOOUUU ESP32-S3-CAM module. The 2 MB app partition
-fits the CB driver even on a 4 MB module; it does not support OTA updates.
+used for both tested modules, including the Freenove N16R8 replacement. The
+2 MB app partition fits the CB driver even on a 4 MB module; it does not
+support OTA updates. Set `camera.hmirror=true` for the tested Freenove camera.
 The VL53L1CB driver is bundled under `src/` from STM32duino VL53L1 2.1.0,
 with a bounded, error-reporting ESP32 I²C adapter and its license in
 `VL53L1-LICENSE.md`. Helm installs Adafruit VL53L5CX 1.0.1 during a normal

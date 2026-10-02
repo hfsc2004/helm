@@ -70,6 +70,7 @@ export interface VehicleStopRequest {
 
 export interface SensorBoardSnapshotRequest {
   vehicleId: string;
+  includeWide?: boolean;
 }
 
 export interface SensorBoardUnoRequest {
@@ -118,13 +119,41 @@ export interface SensorBoardNarrowRange {
   };
 }
 
+export interface SensorBoardWideRange {
+  ok: boolean;
+  ready: boolean;
+  resolution?: 16 | 64;
+  resolutionControlVersion?: number;
+  frequencyHz?: number;
+  profile?: import("./wide-tof.js").WideTofProfile;
+  profileControlVersion?: number;
+  rangingMode?: "continuous" | "autonomous";
+  targetOrder?: "strongest";
+  integrationMs?: number | null;
+  frameSequence?: number;
+  framePeriodMs?: number;
+  signalKcpsPerSpad?: number[];
+  ambientKcpsPerSpad?: number[];
+  targetCount?: number[];
+  ageMs?: number;
+  rawDistanceMm?: number[];
+  targetStatus?: number[];
+  error?: string;
+}
+
+export interface SensorBoardWideConfigureRequest {
+  vehicleId: string;
+  profile: import("./wide-tof.js").WideTofProfile;
+  hz?: number;
+}
+
 export interface SensorBoardSnapshotResponse {
   ranges: { ok: boolean; singleZone: SensorBoardNarrowRange[]; wideReady: boolean; rssi?: number } | null;
   imu: { ok: boolean; accelG: number[]; gyroDps: number[]; temperatureC: number;
     orientationReady?: boolean; orientationDeg?: number[] | null;
     orientationAgeMs?: number; calibrationSamples?: number; calibrationTarget?: number;
     gyroBiasDps?: number[] } | null;
-  wide: { ok: boolean; ready: boolean; ageMs?: number; rawDistanceMm?: number[]; targetStatus?: number[] } | null;
+  wide: SensorBoardWideRange | null;
   rssi: number | null;
   error?: string;
 }
@@ -381,6 +410,8 @@ export interface HelmAPI {
     cmd(req: VehicleCmdRequest): Promise<VehicleCmdResponse>;
     stop(req: VehicleStopRequest): Promise<VehicleCmdResponse>;
     sensorBoardSnapshot(req: SensorBoardSnapshotRequest): Promise<SensorBoardSnapshotResponse>;
+    sensorBoardWideConfigure(req: SensorBoardWideConfigureRequest): Promise<SensorBoardWideRange>;
+    sensorBoardWideSnapshot(req: SensorBoardSnapshotRequest): Promise<SensorBoardWideRange>;
     sensorBoardUno(req: SensorBoardUnoRequest): Promise<SensorBoardUnoResponse>;
     streamState(req: StateStreamRequest, onEvent: (e: StateStreamEvent) => void): Promise<{
       handle: StreamHandle;
@@ -442,6 +473,8 @@ export const IPC = {
     cmd: "vehicle:cmd",
     stop: "vehicle:stop",
     sensorBoardSnapshot: "vehicle:sensor-board-snapshot",
+    sensorBoardWideConfigure: "vehicle:sensor-board-wide-configure",
+    sensorBoardWideSnapshot: "vehicle:sensor-board-wide-snapshot",
     sensorBoardUno: "vehicle:sensor-board-uno",
     streamStateOpen: "vehicle:stream-state-open",
     streamStateClose: "vehicle:stream-state-close",

@@ -2,9 +2,10 @@
 
 This is the first **bench bring-up** image for the ESP32-S3-CAM mounted on the
 GSN Robotics / PSF Sensor Board v1.3. It keeps the existing Helm camera API and
-adds diagnostics that remain reachable while MJPEG is streaming. It does not
-provide a drive endpoint or motor controls; no separate drive ESP32 is assumed
-for this v1.3 bring-up configuration.
+adds diagnostics that remain reachable while MJPEG is streaming. Bounded
+motor commands use the separate ELEGOO Uno UART bridge; this image has no
+drive-board IR collision guard or native skid-steer `/cmd` endpoint. No
+separate drive ESP32 is assumed for this v1.3 bring-up configuration.
 
 ## Implemented
 
@@ -83,10 +84,32 @@ for this v1.3 bring-up configuration.
   overlay on the separate VL53L5CX 8×8 map. The CB quadrants and wide pixels
   are not calibrated to one another, and chip ROI left/right orientation has
   not yet been verified on the mounted board.
-- Wide ranging on port 82: `GET /wide-range` returns the latest VL53L5CX
-  8×8 frame as 64 raw millimeter distances and 64 target-status values,
-  with its age in milliseconds. The sensor remains at `0x29`. Live frames
+- SR Front wide ranging on port 82: `GET /wide-range` returns the latest
+  VL53L5CX frame with `resolution` 16 (4×4) or 64 (8×8), matching distance
+  and target-status arrays, profile metadata, age, frame sequence, and the
+  last captured-frame interval. `GET /wide-tof-config` reads settings;
+  `POST /wide-tof-config?profile=detail|navigation|fast|idle|inspect&hz=N`
+  changes them. The board boots into Low Power (`idle`): 4×4/2 Hz,
+  autonomous ranging, 5 ms integration. Detail is 8×8/10 Hz; Navigation is 8×8/10–15 Hz
+  (default 15), Fast is 4×4/30–60 Hz (default 30), Idle is 4×4/1–2 Hz
+  (default 2), and Inspect is 8×8/5–10 Hz (default 5). All use strongest-target
+  ordering. Idle uses autonomous ranging with a 5 ms integration time;
+  the other profiles use continuous ranging. Inspect additionally returns
+  signal and ambient rates in kcps/SPAD and per-zone target counts. These
+  driver fields are already compiled into the library; Inspect exposes them
+  over HTTP without changing the library's build flags.
+  Switching stops ranging, applies settings, clears the old frame, and restarts;
+  failed changes attempt to restore the previous settings. Polling checks
+  for new frames every 5 ms, subject to other loop work. Requested rates are
+  sensor configuration, not a guarantee of host-visible throughput.
+  The sensor remains at `0x29`. Live frames
   were received on the bench; raw values are not collision decisions.
+  Helm's heat map uses the active 4×4 or 8×8 grid. Its separate polling waits
+  100 ms between completed requests in Fast/Navigation, 200 ms in
+  Detail/Inspect, and 500 ms in Idle. LR/IMU polling retains its 1.5-second
+  interval. Missing responses retain the last SR frame until its age exceeds
+  two seconds; an independent 100 ms UI clock expires stale colors even
+  during a slow request. Invalid zones darken on the next received frame.
 - IMU on port 82: `GET /imu` serves the latest ICM-42607-C sample of three
   accelerometer and three gyro axes, plus die temperature. It reports both raw
   counts and nominal g / degrees-per-second values at 100 Hz, ±2 g and
@@ -218,6 +241,29 @@ for this v1.3 bring-up configuration.
   all three ToF readiness flags were true after startup.
 - Wi-Fi STA with DHCP or static IP; `<name>.local` mDNS when available.
 
+## SR Front profile range observations
+
+User-reported robot tests on 2026-10-02 produced these observed ranges:
+
+| Profile | Grid | Rate | Observed range |
+| --- | --- | --- | --- |
+| Extended Reach (`fast`) | 4×4 | 30 Hz | 6 ft (1.83 m) |
+| Balanced Detail (`detail`) | 8×8 | 10 Hz | 4 ft (1.22 m) |
+| Close Detail (`navigation`) | 8×8 | 15 Hz | 3 ft (0.91 m) |
+| Low Power (`idle`) | 4×4 | 2 Hz | 3 ft (0.91 m) |
+| Far Detail (`inspect`) | 8×8 | 5 Hz | 5 ft (1.52 m) |
+
+Helm uses these display names and shows the observed distances beside them.
+Firmware profile identifiers and CLI commands retain the names in parentheses.
+
+These are observations for this robot and test, not rated sensor limits or
+calibrated navigation thresholds. Target reflectivity, lighting, exact geometry,
+and the criterion for an acceptable return were not recorded. Idle uses a
+5 ms autonomous integration time; its low frame rate does not imply a long
+exposure. Fast at 60 Hz and other selectable rates have no reported range
+result in this test. These results apply only to the SR Front VL53L5CX,
+not the LR Front/Rear VL53L1CB sensors.
+
 ## Still to bring up
 
 IMU axis-orientation and bias calibration, working stereo PDM capture, speaker
@@ -318,10 +364,38 @@ valid target. The board was leaning against a box during the test, explaining
 the rear sensor's near-zero reading. No 8×8 orientation mapping or collision
 threshold has been established yet.
 
+Core allocation:
+
+- **Core 0:** Wi-Fi driver, TCP/IP, camera driver, camera HTTP/MJPEG delivery,
+  and Arduino network events. The installed ESP-IDF configuration also places
+  its main task and ESP timer task on core 0.
+- **Core 1:** the Arduino main loop schedules the SR 4×4/8×8 ToF, both single-zone
+  ToFs, and IMU reads, and packages sensor responses through the diagnostic
+  HTTP server. Uno polling also runs here.
+
+Compile-time checks enforce the Wi-Fi, TCP/IP, camera driver, loop, and event
+affinities. This is not an exclusive reservation of core 1: speaker playback
+and the SDK's FreeRTOS timer service remain unpinned, and each core has its
+own idle task. Diagnostic HTTP handlers share the sensor loop; a slow handler
+can still delay polling even though camera streaming is on the other core.
+
 The camera server has one streaming connection at a time, as in the existing
 video template. It runs in a separate task from the port-82 diagnostics server,
 so sensor and LED testing remain available during the stream. Helm-UI's camera
 cache should be used for simultaneous UI and CLI viewing.
+
+### Microphone retest, 2026-10-02
+
+After the Low Power SR boot-default flash, both `/mic-levels` channels again
+reported mean `-30935` and zero AC RMS. A one-second, 16 kHz stereo WAV
+contained exactly one unique sample value (`-30935`) in each channel across
+all 16,000 frames. The independent hardware-counter test measured 10,259
+GPIO21 clock rising edges and zero GPIO14 DATA rising edges in its 5 ms
+windows, with both counters returning `ESP_OK`. It restored PDM capture;
+the follow-up level check remained flat. This reproduces the previous failure:
+clock activity is present at the ESP32 pad, but microphone DATA activity is
+not detected there. It does not identify a specific failed component or
+establish that the clock reaches the microphone packages.
 
 ## Build and bench use
 
@@ -332,7 +406,7 @@ pin profile. The Sensor Board's own USB-C socket is power-only. Use the
 ESP32-S3-CAM module's programming connector for flashing, after confirming
 the module and serial port.
 
-The default FQBN is `esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=no_ota`,
+The default FQBN is `esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=no_ota,LoopCore=1,EventsCore=0`,
 used for both tested modules, including the Freenove N16R8 replacement. The
 2 MB app partition fits the CB driver even on a 4 MB module; it does not
 support OTA updates. Set `camera.hmirror=true` for the tested Freenove camera.

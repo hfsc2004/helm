@@ -13,7 +13,6 @@
   import AudioFeed from "../components/AudioFeed.svelte";
   import ActivityLog from "../components/ActivityLog.svelte";
   import SensorBoardReadouts from "../components/SensorBoardReadouts.svelte";
-  import UnoControls from "../components/UnoControls.svelte";
   import UnoKeyboard from "../components/UnoKeyboard.svelte";
   import { hasDriveControl } from "@shared/vehicle-contract";
 
@@ -54,7 +53,6 @@
       {#if selectedVehicle?.sensorBoardRevision === "1.3"}
         {#key selectedVehicle.id}
           <UnoKeyboard vehicleId={selectedVehicle.id} mode={$inputMode} />
-          <UnoControls vehicleId={selectedVehicle.id} />
           <SensorBoardReadouts vehicleId={selectedVehicle.id} />
         {/key}
       {:else}

@@ -244,6 +244,28 @@ helm describe
 
 Emits a single JSON blob describing every command, argument, flag, event, and exit code. **If anything in this AGENTS.md conflicts with `helm describe`, trust `helm describe`.** Code is authoritative; docs drift. You can also use `helm describe` to discover commands this file doesn't mention.
 
+### SR Front ToF profiles (Sensor Board v1.3)
+
+`helm vehicle-wide-tof <id> status|frame|detail|navigation|fast|idle|inspect`
+controls only the SR Front VL53L5CX. Use Detail while stopped/observing
+(8×8, 10 Hz); Navigation for normal travel (8×8, 10–15 Hz, default 15);
+Fast for faster motion (4×4, 30–60 Hz, default 30); Idle when unused
+(4×4, 1–2 Hz, default 2, autonomous, 5 ms integration); and Inspect for
+troubleshooting (8×8, 5–10 Hz, default 5, signal/ambient/status/target counts).
+Use `--hz N` within the profile's range. `4x4` aliases Fast and `8x8`
+aliases Detail. All profiles select the strongest target. Motor commands do
+not choose profiles automatically. `frame` returns the latest cached data:
+check its age, validity, resolution, frame sequence, and captured-frame interval;
+requested frequency does not guarantee fresh frames at that rate.
+The separate LR Front/Rear VL53L1CBs use `vehicle-tof-mode` and are unaffected.
+Helm display names follow the robot's observed ranges: `fast` is Extended
+Reach (~6 ft at 30 Hz), `inspect` is Far Detail (~5 ft at 5 Hz), `detail`
+is Balanced Detail (~4 ft at 10 Hz), `navigation` is Close Detail (~3 ft at
+15 Hz), and `idle` is Low Power (~3 ft at 2 Hz). These are test observations,
+not guaranteed sensor limits; CLI/firmware identifiers remain unchanged.
+The firmware boot default is Low Power (`idle`): 4×4 at 2 Hz with autonomous
+ranging and 5 ms integration. Select another profile explicitly when needed.
+
 ---
 
 ## Exit codes — what your shell sees

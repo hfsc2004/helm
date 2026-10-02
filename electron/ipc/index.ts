@@ -13,6 +13,7 @@ import type {
   StateStreamRequest,
   SensorBoardSnapshotRequest,
   SensorBoardSnapshotResponse,
+  SensorBoardWideConfigureRequest,
   SensorBoardUnoRequest,
   SensorBoardUnoResponse,
   VehicleAddRequest,
@@ -38,6 +39,7 @@ import { hasDriveControl } from "../../shared/vehicle-contract.js";
 import * as registry from "../../core/vehicles/registry.js";
 import * as adapter from "../../core/vehicles/ground-skidsteer.js";
 import * as cameraStream from "../../core/vehicles/camera-stream.js";
+import { configureWideTof, readWideTof } from "../../core/vehicles/wide-tof.js";
 import * as ollamaManager from "../../core/llm/ollama/manager.js";
 import { plan, DEFAULT_PLANNER_MODEL } from "../../core/llm/planner.js";
 import { listSerialPorts } from "../../core/serial/index.js";
@@ -323,7 +325,7 @@ export function registerIpcHandlers(opts: { version: string }): void {
     // Keep requests sequential: the board also serves the live camera feed.
     const ranges = await read<SensorBoardSnapshotResponse["ranges"]>("/ranges");
     const imu = await read<SensorBoardSnapshotResponse["imu"]>("/imu");
-    const wide = await read<SensorBoardSnapshotResponse["wide"]>("/wide-range");
+    const wide = req.includeWide === false ? null : await read<SensorBoardSnapshotResponse["wide"]>("/wide-range");
     return {
       ranges,
       imu,
@@ -331,6 +333,24 @@ export function registerIpcHandlers(opts: { version: string }): void {
       rssi: typeof ranges?.rssi === "number" ? ranges.rssi : null,
       ...(!ranges && !imu && !wide ? { error: "sensor diagnostics unreachable on port 82" } : {}),
     };
+  });
+
+  ipcMain.handle(IPC.vehicle.sensorBoardWideConfigure, async (_e, req: SensorBoardWideConfigureRequest) => {
+    const vehicle = registry.get(req.vehicleId);
+    if (!vehicle) return { ok: false, ready: false, error: "Vehicle not found." };
+    try {
+      if (!req.profile) return { ok: false, ready: false, error: "A profile is required." };
+      return await configureWideTof(vehicle, req.profile, undefined, req.hz);
+    } catch (error) {
+      return { ok: false, ready: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  ipcMain.handle(IPC.vehicle.sensorBoardWideSnapshot, async (_e, req: SensorBoardSnapshotRequest) => {
+    const vehicle = registry.get(req.vehicleId);
+    if (!vehicle) return { ok: false, ready: false, error: "Vehicle not found." };
+    try { return await readWideTof(vehicle); }
+    catch (error) { return { ok: false, ready: false, error: error instanceof Error ? error.message : String(error) }; }
   });
 
   ipcMain.handle(IPC.vehicle.sensorBoardUno, async (_e, req: SensorBoardUnoRequest): Promise<SensorBoardUnoResponse> => {

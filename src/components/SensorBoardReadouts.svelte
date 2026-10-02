@@ -3,6 +3,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import type { SensorBoardScanZone, SensorBoardSnapshotResponse } from "@shared/ipc-channels";
+  import { isWideTofProfile, WIDE_TOF_PROFILES, type WideTofProfile } from "@shared/wide-tof";
+  import { wideTofCells, wideDistanceBands as distanceBands } from "../lib/wide-tof-display";
 
   export let vehicleId: string;
 
@@ -15,7 +17,59 @@
   let now = Date.now();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let active = false;
+  let wideTimer: ReturnType<typeof setTimeout> | undefined;
+  let ageTimer: ReturnType<typeof setInterval> | undefined;
+  let wideBusy = false;
+  let wideEpoch = 0;
+  let wideError = "";
+  let profileError = "";
+  $: wideResolution = snapshot?.wide?.resolution ??
+    (snapshot?.wide?.rawDistanceMm?.length === 16 ? 16 : 64);
+  $: gridSide = wideResolution === 16 ? 4 : 8;
+  $: wideFrameAge = snapshot?.wide?.ageMs == null || !wideUpdatedAt ? Infinity :
+    snapshot.wide.ageMs + Math.max(0, now - wideUpdatedAt);
+  $: wideCells = wideTofCells(snapshot?.wide ?? null, wideFrameAge);
+  $: canConfigureWide = (snapshot?.wide?.profileControlVersion ?? 0) >= 1;
+  $: profileChoice = snapshot?.wide?.profile ?? "detail";
+  $: rateChoice = snapshot?.wide?.frequencyHz ?? WIDE_TOF_PROFILES[profileChoice].hz;
+  $: profileRates = Array.from(
+    { length: WIDE_TOF_PROFILES[profileChoice].maxHz - WIDE_TOF_PROFILES[profileChoice].minHz + 1 },
+    (_, i) => WIDE_TOF_PROFILES[profileChoice].minHz + i);
   $: frontScan = snapshot?.ranges?.singleZone?.find((item) => item.name === "front")?.scan;
+
+  async function setWideProfile(profile: WideTofProfile, hz?: number) {
+    if (wideBusy) return;
+    wideBusy = true;
+    ++wideEpoch;
+    profileError = "";
+    try {
+      const result = await window.helm.vehicle.sensorBoardWideConfigure({ vehicleId, profile, hz });
+      if (!result.ok) throw new Error(result.error ?? "SR Front profile change failed.");
+      // A settings response has no distance frame. Wait for a fresh frame
+      // instead of redrawing old measurements at the new resolution.
+      snapshot = { ranges: snapshot?.ranges ?? null, imu: snapshot?.imu ?? null,
+        wide: { ...result, ready: false }, rssi: snapshot?.rssi ?? null, error: snapshot?.error };
+      wideUpdatedAt = 0;
+    } catch (error) {
+      profileError = String(error);
+      if (snapshot?.wide) snapshot = { ...snapshot, wide: { ...snapshot.wide,
+        ready: false, rawDistanceMm: undefined, targetStatus: undefined } };
+      wideUpdatedAt = 0;
+    } finally {
+      if (active) wideBusy = false;
+    }
+  }
+
+  function changeWideProfile(event: Event & { currentTarget: HTMLSelectElement }) {
+    // Read the user's choice from the event, before reactive/poll updates can
+    // overwrite it with the board's last confirmed value.
+    const profile = event.currentTarget.value;
+    if (isWideTofProfile(profile)) void setWideProfile(profile);
+  }
+
+  function changeWideRate(event: Event & { currentTarget: HTMLSelectElement }) {
+    void setWideProfile(profileChoice, Number(event.currentTarget.value));
+  }
 
   const formatDistance = (value: number | null | undefined) => {
     if (value == null || !Number.isFinite(value)) return "—";
@@ -93,39 +147,46 @@
     values?.[index] == null ? "—" : `${(values[index] * sign).toFixed(1)}°`;
   const ageLabel = (sampledAt: number, currentTime: number) =>
     sampledAt && currentTime - sampledAt > 5000 ? ` · last sample ${Math.round((currentTime - sampledAt) / 1000)}s ago` : "";
-  const zoneValid = (index: number) =>
-    (snapshot?.wide?.targetStatus?.[index] === 5 || snapshot?.wide?.targetStatus?.[index] === 9) &&
-    (effectiveAge(snapshot?.wide?.ageMs, wideUpdatedAt) ?? Infinity) <= 2000;
-  const distanceBands = [
-    { maxMm: 250, label: "≤25 cm", color: "#e5484d" },
-    { maxMm: 500, label: "25–50 cm", color: "#f58135" },
-    { maxMm: 750, label: "50–75 cm", color: "#f5cc37" },
-    { maxMm: 1000, label: "75 cm–1 m", color: "#94d82d" },
-    { maxMm: 1500, label: "1–1.5 m", color: "#28c7bc" },
-    { maxMm: 2500, label: "1.5–2.5 m", color: "#4d8cf5" },
-    { maxMm: Infinity, label: ">2.5 m", color: "#ae7bf4" },
-  ];
-  const zoneColor = (index: number) => {
-    if (!zoneValid(index)) return "var(--surface-2, #20272e)";
-    const distance = snapshot?.wide?.rawDistanceMm?.[index] ?? 0;
-    return distanceBands.find((band) => distance <= band.maxMm)?.color ?? distanceBands[distanceBands.length - 1].color;
-  };
 
   onMount(() => {
     active = true;
+    ageTimer = setInterval(() => { now = Date.now(); }, 100);
+    const pollWide = async () => {
+      const epoch = wideEpoch;
+      if (!wideBusy) {
+        try {
+          const next = await window.helm.vehicle.sensorBoardWideSnapshot({ vehicleId });
+          if (active && !wideBusy && epoch === wideEpoch) {
+            wideError = next.ok ? "" : next.error ?? "SR Front unavailable.";
+            if (next.ok) {
+              wideUpdatedAt = Date.now();
+              snapshot = { ranges: snapshot?.ranges ?? null, imu: snapshot?.imu ?? null,
+                wide: next, rssi: snapshot?.rssi ?? null, error: snapshot?.error };
+            }
+          }
+        } catch (error) {
+          if (active && epoch === wideEpoch) wideError = String(error);
+        }
+      }
+      // Display polling is independent of the slower LR/IMU sidebar reads.
+      const profile = snapshot?.wide?.profile;
+      const interval = profile === "idle" ? 500 :
+        profile === "fast" || profile === "navigation" ? 100 : 200;
+      if (active) wideTimer = setTimeout(pollWide, interval);
+    };
     const poll = async () => {
       try {
-        const next = await window.helm.vehicle.sensorBoardSnapshot({ vehicleId });
+        const next = await window.helm.vehicle.sensorBoardSnapshot({ vehicleId, includeWide: false });
+        if (!active) return;
         now = Date.now();
         if (next.ranges || next.imu || next.wide) updatedAt = now;
         if (next.imu) imuUpdatedAt = now;
         if (next.ranges) rangesUpdatedAt = now;
-        if (next.wide) wideUpdatedAt = now;
         if (next.rssi != null) signalUpdatedAt = now;
         snapshot = {
           ranges: next.ranges ?? snapshot?.ranges ?? null,
           imu: next.imu ?? snapshot?.imu ?? null,
-          wide: next.wide ?? snapshot?.wide ?? null,
+          wide: snapshot?.wide ?? null,
           rssi: next.rssi ?? snapshot?.rssi ?? null,
           error: next.error,
         };
@@ -142,9 +203,12 @@
       if (active) timer = setTimeout(poll, 1500);
     };
     void poll();
+    void pollWide();
     return () => {
       active = false;
       if (timer) clearTimeout(timer);
+      if (wideTimer) clearTimeout(wideTimer);
+      if (ageTimer) clearInterval(ageTimer);
     };
   });
 </script>
@@ -157,10 +221,10 @@
     {:else}Live · updated {new Date(updatedAt).toLocaleTimeString()}{/if}
   </p>
 
-  <h3>Distance</h3>
+  <h3>LR Distance</h3>
   {#each ["front", "rear"] as name}
     {@const sensor = snapshot?.ranges?.singleZone?.find((item) => item.name === name)}
-    <div class="readout"><span>{name === "front" ? "Front" : "Rear"} ToF</span><strong>{rangeText(snapshot?.ranges ?? null, name)}</strong></div>
+    <div class="readout"><span>LR {name === "front" ? "Front" : "Rear"} ToF</span><strong>{rangeText(snapshot?.ranges ?? null, name)}</strong></div>
     {#if sensor?.scan?.zones?.length === 5}
       <div class="scan-list" aria-label={`${name} ToF scan regions`}>
         {#each sensor.scan.zones as zone}
@@ -176,13 +240,37 @@
   {/each}
   <p class="hint">Quadrant names are chip-ROI coordinates, not verified physical left/right. A missing return does not mean the path is clear.</p>
 
-  <h3>Wide 8×8 ToF</h3>
-  {#if wideUpdatedAt}<p class="hint">Frame age: {effectiveAge(snapshot?.wide?.ageMs, wideUpdatedAt) == null ? "unknown" : `${((effectiveAge(snapshot?.wide?.ageMs, wideUpdatedAt) ?? 0) / 1000).toFixed(1)}s`}{(effectiveAge(snapshot?.wide?.ageMs, wideUpdatedAt) ?? Infinity) > 2000 ? " · stale" : ""}</p>{/if}
-  {#if snapshot?.wide?.ready && snapshot.wide.rawDistanceMm?.length === 64}
+  <h3>SR Front ToF · {gridSide}×{gridSide}</h3>
+  <div class="wide-controls">
+    <label>Profile
+      <select value={profileChoice} disabled={wideBusy || !canConfigureWide}
+        on:change={changeWideProfile}>
+        {#each Object.entries(WIDE_TOF_PROFILES) as [profile, settings]}
+          <option value={profile}>{settings.label} · ~{settings.observedFeet}′ · {settings.resolution === 16 ? "4×4" : "8×8"}</option>
+        {/each}
+      </select>
+    </label>
+    <label>Rate
+      <select value={rateChoice} disabled={wideBusy || !canConfigureWide || profileRates.length === 1}
+        on:change={changeWideRate}>
+        {#each profileRates as hz}<option value={hz}>{hz} Hz</option>{/each}
+      </select>
+    </label>
+  </div>
+  {#if wideBusy}<p class="hint">Changing SR Front profile…</p>{/if}
+  {#if profileError || wideError}<p class="hint error">{profileError || wideError}</p>{/if}
+  {#if snapshot?.wide && !canConfigureWide}<p class="hint">Update the sensor-board firmware to enable SR Front profiles.</p>{/if}
+  {#if snapshot?.wide?.profile}
+    <p class="hint">Observed range: ~{WIDE_TOF_PROFILES[profileChoice].observedFeet}′ at {WIDE_TOF_PROFILES[profileChoice].hz} Hz in your test.</p>
+    <p class="hint">{snapshot.wide.frequencyHz} Hz requested · {snapshot.wide.rangingMode} · strongest target{snapshot.wide.integrationMs != null ? ` · ${snapshot.wide.integrationMs} ms integration` : ""}</p>
+  {/if}
+  {#if wideUpdatedAt}<p class="hint">Frame age: {Number.isFinite(wideFrameAge) ? `${(wideFrameAge / 1000).toFixed(1)}s` : "unknown"}{wideFrameAge > 2000 ? " · stale" : ""}</p>{/if}
+  {#if !wideBusy && snapshot?.wide?.ready && snapshot.wide.rawDistanceMm?.length === wideResolution && snapshot.wide.targetStatus?.length === wideResolution}
     <div class="grid-wrap">
-      <div class="grid" aria-label="Raw 8 by 8 distance map">
-        {#each snapshot.wide.rawDistanceMm as distance, index}
-          <div class="zone" class:invalid={!zoneValid(index)} style:background-color={zoneColor(index)} title={`Zone ${index}: ${zoneValid(index) ? formatDistance(distance) : "no fresh valid return"}`}></div>
+      <div class="grid" style:grid-template-columns={`repeat(${gridSide}, 1fr)`}
+        style:grid-template-rows={`repeat(${gridSide}, 1fr)`} aria-label={`Raw ${gridSide} by ${gridSide} distance map`}>
+        {#each wideCells as cell}
+          <div class="zone" class:invalid={!cell.valid} style:background-color={cell.color} title={cell.title}></div>
         {/each}
       </div>
       {#if frontScan?.zones?.length === 5}
@@ -196,15 +284,16 @@
         </div>
       {/if}
     </div>
-    <div class="distance-legend" aria-label="8 by 8 distance colors">
+    <div class="distance-legend" aria-label="SR Front distance colors">
       {#each distanceBands as band}
         <span><i style:background-color={band.color}></i>{band.label}</span>
       {/each}
       <span><i class="invalid-swatch"></i>Invalid or stale</span>
     </div>
-    <p class="hint">Colored squares are the 8×8 sensor. White transparent outlines and UL/UR/LL/LR labels are the separate CB quadrant scan, approximately placed—not pixel-aligned. * = stale confirmed CB value; ? = unconfirmed CB value; ! = raw CB target with invalid status, not a reliable distance.</p>
+    <p class="hint">Colored squares are the SR Front sensor. White outlines and UL/UR/LL/LR labels are the separate LR Front quadrant scan, approximately placed—not pixel-aligned. * = stale confirmed LR value; ? = unconfirmed; ! = invalid raw target.</p>
+    {#if snapshot.wide.profile === "inspect"}<p class="hint">Hover a square for target status, signal, ambient level, and target count.</p>{/if}
   {:else}
-    <p class="hint">No 8×8 frame available.</p>
+    <p class="hint">Waiting for a fresh {gridSide}×{gridSide} frame.</p>
   {/if}
 
   <h3>IMU <small>(chip axes)</small></h3>
@@ -247,7 +336,12 @@
   .scan-row strong { font-variant-numeric: tabular-nums; text-align: right; }
   .scan-row small { grid-column: 1 / -1; color: var(--muted); }
   .grid-wrap { position: relative; width: min(100%, 256px); aspect-ratio: 1; }
-  .grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 2px; width: 100%; height: 100%; }
+  .grid { display: grid; gap: 2px; width: 100%; height: 100%; }
+  .wide-controls { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.4rem 0; }
+  .wide-controls label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.75rem; color: var(--muted); }
+  .wide-controls label:first-child { min-width: 0; max-width: 100%; }
+  .wide-controls select { background: var(--surface-2, #20272e); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 0.3rem; }
+  .hint.error { color: #ff9c9c; }
   .zone { border-radius: 2px; }
   .zone.invalid { opacity: 0.5; }
   .distance-legend { display: flex; flex-wrap: wrap; gap: 0.3rem 0.65rem; margin: 0.45rem 0; font-size: 0.68rem; color: var(--muted); }

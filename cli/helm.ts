@@ -26,6 +26,7 @@ import "./commands/vehicle-speaker.js";
 import "./commands/vehicle-mic-clock.js";
 import "./commands/vehicle-uno.js";
 import "./commands/vehicle-tof-mode.js";
+import "./commands/vehicle-wide-tof.js";
 import "./commands/vehicle-imu-zero.js";
 import "./commands/vehicle-sensor-board.js";
 import "./commands/vehicle-drive.js";

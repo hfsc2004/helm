@@ -1,7 +1,7 @@
 // PSF Sensor Board v1.3 bench bring-up firmware.
 // Camera endpoints are on port 81; sensors and LED diagnostics are on port 82.
-// No motor endpoint is provided. IR emitters and UART telemetry are not
-// reported until their drivers are tested.
+// Bounded Uno commands use the UART bridge; there is no IR collision guard.
+// Uno replies and working microphone DATA remain unresolved.
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -23,6 +23,23 @@
 #include <Adafruit_VL53L5CX.h>
 #include <math.h>
 #include "startup_chime.h"
+
+// Keep Wi-Fi and camera serving on core 0; sensor/control polling stays on core 1.
+#if !defined(CONFIG_ESP_WIFI_TASK_PINNED_TO_CORE_0) || !CONFIG_ESP_WIFI_TASK_PINNED_TO_CORE_0
+#error "Sensor Board v1.3 requires the Wi-Fi driver task pinned to core 0"
+#endif
+#if !defined(CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0) || !CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0
+#error "Sensor Board v1.3 requires the TCP/IP task pinned to core 0"
+#endif
+#if !defined(CONFIG_CAMERA_CORE0) || !CONFIG_CAMERA_CORE0
+#error "Sensor Board v1.3 requires the camera driver task pinned to core 0"
+#endif
+#if ARDUINO_RUNNING_CORE != 1
+#error "Sensor Board v1.3 requires LoopCore=1 for sensor polling and packaging"
+#endif
+#if ARDUINO_EVENT_RUNNING_CORE != 0
+#error "Sensor Board v1.3 requires EventsCore=0 for network events"
+#endif
 
 static const char *WIFI_SSID = "{{wifi.ssid}}";
 static const char *WIFI_PASSWORD = "{{wifi.password}}";
@@ -151,6 +168,13 @@ bool playStartupChime();
 bool showLeds();
 uint8_t speakerPcmPendingSize = 0;
 VL53L5CX_ResultsData wideResults = {};
+// Boot in Low Power; Helm can select a higher-rate profile when needed.
+uint8_t wideResolution = 16;
+uint8_t wideFrequencyHz = 2;
+const char *wideProfile = "idle";
+bool wideAutonomous = true;
+uint32_t wideFrameSequence = 0;
+uint32_t wideFramePeriodMs = 0;
 bool wideHasFrame = false;
 uint32_t wideCapturedAt = 0;
 uint32_t wideLastPollAt = 0;
@@ -607,8 +631,11 @@ void initTofSensors() {
   delay(100);
   if (!i2cPresent(0x29)) return;
   wideTofReady = wideTof.begin(0x29, &Wire, 400000) &&
-    wideTof.setResolution(64) &&
-    wideTof.setRangingFrequency(5) &&
+    wideTof.setResolution(wideResolution) &&
+    wideTof.setRangingFrequency(wideFrequencyHz) &&
+    wideTof.setTargetOrder(VL53L5CX_TARGET_ORDER_STRONGEST) &&
+    wideTof.setRangingMode(wideAutonomous ? VL53L5CX_RANGING_MODE_AUTONOMOUS : VL53L5CX_RANGING_MODE_CONTINUOUS) &&
+    (!wideAutonomous || wideTof.setIntegrationTime(5)) &&
     wideTof.startRanging();
   Serial.printf("ToF front=%d rear=%d wide=%d\n",
                 frontTofReady, rearTofReady, wideTofReady);
@@ -1089,29 +1116,132 @@ void sendRanges() {
   diagnosticServer.send(200, "application/json", body);
 }
 
+String wideResolutionJson(bool ok) {
+  return "{\"ok\":" + String(ok ? "true" : "false") +
+    ",\"ready\":" + String(wideTofReady && wideHasFrame ? "true" : "false") +
+    ",\"resolution\":" + String(wideResolution) +
+    ",\"resolutionControlVersion\":1,\"profileControlVersion\":1,\"profile\":\"" + String(wideProfile) +
+    "\",\"frequencyHz\":" + String(wideFrequencyHz) +
+    ",\"rangingMode\":\"" + String(wideAutonomous ? "autonomous" : "continuous") +
+    "\",\"targetOrder\":\"strongest\",\"integrationMs\":" + String(wideAutonomous ? "5" : "null") + "}";
+}
+
+void sendWideResolution() {
+  diagnosticServer.send(200, "application/json", wideResolutionJson(wideTofReady));
+}
+
+void setWideResolution() {
+  String profile = diagnosticServer.arg("profile");
+  if (profile.isEmpty()) {
+    const String requested = diagnosticServer.arg("resolution");
+    if (requested == "16") profile = "fast";
+    else if (requested == "64") profile = "detail";
+  }
+  const char *nextProfile = nullptr;
+  uint8_t next = 64, hz = 10, minHz = 10, maxHz = 10;
+  if (profile == "detail") nextProfile = "detail";
+  else if (profile == "navigation") { nextProfile = "navigation"; hz = 15; maxHz = 15; }
+  else if (profile == "fast") { nextProfile = "fast"; next = 16; hz = minHz = 30; maxHz = 60; }
+  else if (profile == "idle") { nextProfile = "idle"; next = 16; hz = maxHz = 2; minHz = 1; }
+  else if (profile == "inspect") { nextProfile = "inspect"; hz = minHz = 5; maxHz = 10; }
+  if (!nextProfile) {
+    diagnosticServer.send(400, "application/json", "{\"ok\":false,\"error\":\"use detail, navigation, fast, idle, or inspect\"}");
+    return;
+  }
+  if (diagnosticServer.hasArg("hz")) {
+    const String value = diagnosticServer.arg("hz");
+    bool digits = !value.isEmpty() && value.length() <= 2;
+    for (uint8_t i = 0; i < value.length(); ++i) digits = digits && isDigit(value[i]);
+    const int requestedHz = value.toInt();
+    if (!digits || requestedHz < minHz || requestedHz > maxHz) {
+      diagnosticServer.send(400, "application/json", "{\"ok\":false,\"error\":\"frequency is outside the profile range\"}");
+      return;
+    }
+    hz = requestedHz;
+  }
+  if (!wideTofReady) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"wide ToF unavailable\"}");
+    return;
+  }
+  if (profile == wideProfile && hz == wideFrequencyHz) { sendWideResolution(); return; }
+  if (!wideTof.stopRanging()) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"could not stop wide ToF\"}");
+    return;
+  }
+  // Never publish the old frame with new dimensions, including on rollback.
+  wideHasFrame = false;
+  wideResults = {};
+  wideFramePeriodMs = 0;
+  const bool autonomous = profile == "idle";
+  const bool configured = wideTof.setResolution(next) &&
+    wideTof.setRangingFrequency(hz) &&
+    wideTof.setTargetOrder(VL53L5CX_TARGET_ORDER_STRONGEST) &&
+    wideTof.setRangingMode(autonomous ? VL53L5CX_RANGING_MODE_AUTONOMOUS : VL53L5CX_RANGING_MODE_CONTINUOUS) &&
+    (!autonomous || wideTof.setIntegrationTime(5)) && wideTof.startRanging();
+  if (!configured) {
+    wideTof.stopRanging();
+    wideTofReady = wideTof.setResolution(wideResolution) &&
+      wideTof.setRangingFrequency(wideFrequencyHz) &&
+      wideTof.setTargetOrder(VL53L5CX_TARGET_ORDER_STRONGEST) &&
+      wideTof.setRangingMode(wideAutonomous ? VL53L5CX_RANGING_MODE_AUTONOMOUS : VL53L5CX_RANGING_MODE_CONTINUOUS) &&
+      (!wideAutonomous || wideTof.setIntegrationTime(5)) && wideTof.startRanging();
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"profile change failed\"}");
+    return;
+  }
+  wideResolution = next;
+  wideFrequencyHz = hz;
+  wideProfile = nextProfile;
+  wideAutonomous = autonomous;
+  wideLastPollAt = millis();
+  sendWideResolution();
+}
+
 void sendWideRange() {
   if (!wideTofReady) {
     diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"wide ToF unavailable\"}");
     return;
   }
   if (!wideHasFrame) {
-    diagnosticServer.send(202, "application/json", "{\"ok\":true,\"ready\":false}");
+    diagnosticServer.send(202, "application/json", wideResolutionJson(true));
     return;
   }
   String body;
-  body.reserve(1600);
-  body = "{\"ok\":true,\"ready\":true,\"ageMs\":" + String(millis() - wideCapturedAt);
+  body.reserve(strcmp(wideProfile, "inspect") == 0 ? 3500 : 1600);
+  body = wideResolutionJson(true);
+  body.remove(body.length() - 1);
+  body += ",\"frameSequence\":" + String(wideFrameSequence);
+  body += ",\"framePeriodMs\":" + String(wideFramePeriodMs);
+  body += ",\"ageMs\":" + String(millis() - wideCapturedAt);
   body += ",\"rawDistanceMm\":[";
-  for (uint8_t zone = 0; zone < 64; ++zone) {
+  for (uint8_t zone = 0; zone < wideResolution; ++zone) {
     if (zone) body += ',';
     body += String(wideResults.distance_mm[zone]);
   }
   body += "],\"targetStatus\":[";
-  for (uint8_t zone = 0; zone < 64; ++zone) {
+  for (uint8_t zone = 0; zone < wideResolution; ++zone) {
     if (zone) body += ',';
     body += String(wideResults.target_status[zone]);
   }
-  body += "]}";
+  body += ']';
+  if (strcmp(wideProfile, "inspect") == 0) {
+    body += ",\"signalKcpsPerSpad\":[";
+    for (uint8_t zone = 0; zone < wideResolution; ++zone) {
+      if (zone) body += ',';
+      body += String(wideResults.signal_per_spad[zone]);
+    }
+    body += "],\"ambientKcpsPerSpad\":[";
+    for (uint8_t zone = 0; zone < wideResolution; ++zone) {
+      if (zone) body += ',';
+      body += String(wideResults.ambient_per_spad[zone]);
+    }
+    body += "],\"targetCount\":[";
+    for (uint8_t zone = 0; zone < wideResolution; ++zone) {
+      if (zone) body += ',';
+      body += String(wideResults.nb_target_detected[zone]);
+    }
+    body += ']';
+  }
+  body += '}';
   diagnosticServer.send(200, "application/json", body);
 }
 
@@ -2162,7 +2292,7 @@ void setup() {
   cameraServer.on("/capture", HTTP_GET, sendCapture);
   cameraServer.on("/stream", HTTP_GET, sendStream);
   cameraServer.begin();
-  xTaskCreatePinnedToCore(cameraTask, "camera-http", 8192, nullptr, 1, nullptr, 1);
+  xTaskCreatePinnedToCore(cameraTask, "camera-http", 8192, nullptr, 1, nullptr, 0);
 
   // Keep the camera reachable while the wide sensor loads its firmware over
   // I2C; this can take several seconds on the first initialization.
@@ -2177,6 +2307,10 @@ void setup() {
   diagnosticServer.on("/tof-mode", HTTP_GET, sendTofMode);
   diagnosticServer.on("/tof-mode", HTTP_POST, setTofMode);
   diagnosticServer.on("/wide-range", HTTP_GET, sendWideRange);
+  diagnosticServer.on("/wide-tof-resolution", HTTP_GET, sendWideResolution);
+  diagnosticServer.on("/wide-tof-resolution", HTTP_POST, setWideResolution);
+  diagnosticServer.on("/wide-tof-config", HTTP_GET, sendWideResolution);
+  diagnosticServer.on("/wide-tof-config", HTTP_POST, setWideResolution);
   diagnosticServer.on("/imu", HTTP_GET, sendImu);
   diagnosticServer.on("/imu/zero", HTTP_POST, zeroImuOrientation);
   diagnosticServer.on("/mic-levels", HTTP_GET, sendMicrophoneLevels);
@@ -2220,6 +2354,8 @@ void setup() {
 }
 
 void loop() {
+  // Arduino's loop task is pinned to core 1. Package sensor responses here
+  // alongside acquisition; camera serving and TCP/IP run on core 0.
   diagnosticServer.handleClient();
   pollUnoDriveDeadline();
   pollUnoStartupLedClear();
@@ -2229,11 +2365,14 @@ void loop() {
   pollNarrowTof(rearTof, rearTofReady, rearTofSample,
     rearTofMode, rearTofAuto, rearTofInvalidSince);
   pollImu();
-  if (wideTofReady && millis() - wideLastPollAt >= 40) {
+  if (wideTofReady && millis() - wideLastPollAt >= 5) {
     wideLastPollAt = millis();
     if (wideTof.isDataReady() && wideTof.getRangingData(&wideResults)) {
+      const uint32_t capturedAt = millis();
+      wideFramePeriodMs = wideHasFrame ? capturedAt - wideCapturedAt : 0;
+      ++wideFrameSequence;
       wideHasFrame = true;
-      wideCapturedAt = millis();
+      wideCapturedAt = capturedAt;
     }
   }
   delay(2);

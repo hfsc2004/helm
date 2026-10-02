@@ -5,6 +5,47 @@ All notable changes to PSF Helm will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.9] - 2026-10-02
+
+### Added
+- Add SR Front VL53L5CX profiles with runtime 4×4/8×8 switching, rate selection,
+  strongest-target ordering, and Inspect signal/ambient/target-count diagnostics.
+  Expose settings and cached frames through `helm vehicle-wide-tof` and the UI.
+- Name the UI profiles Extended Reach, Far Detail, Balanced Detail, Close Detail,
+  and Low Power, with the robot's observed test ranges shown beside them.
+- Add regression coverage for profile requests, frequency bounds, frame dimensions,
+  distance colors, invalid returns, and stale-frame expiry.
+
+### Changed
+- Boot SR Front into Low Power: 4×4 at 2 Hz, autonomous ranging, 5 ms integration.
+- Place camera delivery, Wi-Fi, TCP/IP, and network events on core 0; retain
+  sensor polling and response packaging on core 1 with compile-time affinity checks.
+- Poll the SR heat map independently of LR/IMU reads: 100 ms after each request
+  in Fast/Navigation, 200 ms in Detail/Inspect, and 500 ms in Low Power.
+- Remove the ELEGOO Uno test panel from Drive; keyboard driving remains available.
+
+### Fixed
+- Recompute heat-map colors and validity when indexed measurements change,
+  and expire stale colors through a separate 100 ms UI clock.
+- Send dropdown profile/rate changes from the event's selected value rather
+  than relying on bound state that can still contain the previous selection.
+- Clear old SR frames during profile changes and reject mismatched dimensions.
+
+### Verified on hardware
+- Flash the core-affinity and SR profile firmware on the ESP32-S3; switch all
+  five profiles through the CLI, receive 16-zone Idle and 64-zone Detail/Inspect
+  frames, and expose Inspect diagnostic arrays. Flash the Low Power boot default.
+- Record user-reported SR ranges at the default profile rates: Extended Reach
+  6 ft, Far Detail 5 ft, Balanced Detail 4 ft, Close Detail 3 ft, Low Power 3 ft.
+  These are observations, not calibrated obstacle thresholds or guaranteed limits.
+
+### Known issues
+- Microphone retesting still returns constant `-30935` PCM with zero AC RMS
+  on both channels; hardware counting sees clock edges but no DATA edges.
+- Intermittent sensor-board I²C startup failure may require a full power cycle.
+  LR sensor recovery and stale confirmed measurements remain follow-up work.
+- Restart Helm after updating the preload/main process to load new IPC controls.
+
 ## [0.3.8] - 2026-10-01
 
 ### Added

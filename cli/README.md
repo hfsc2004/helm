@@ -56,6 +56,48 @@ npm run helm -- vehicle-tof-mode Truck auto --sensor front
 disables automatic fallback for the selected sensor until `auto` is restored
 or the board reboots. The 8×8 wide sensor is unaffected.
 
+## SR Front VL53L5CX profiles
+
+The SR Front sensor supports runtime 4×4/8×8 switching. It is separate from
+the LR Front and Rear VL53L1CB sensors controlled by `vehicle-tof-mode`.
+
+| Profile | Helm display name | Grid | Default / allowed Hz | Observed range at default Hz | Ranging |
+| --- | --- | --- | --- | --- | --- |
+| `detail` | Balanced Detail | 8×8 | 10 | ~4 ft | Continuous, strongest target |
+| `navigation` | Close Detail | 8×8 | 15 / 10–15 | ~3 ft | Continuous, strongest target |
+| `fast` | Extended Reach | 4×4 | 30 / 30–60 | ~6 ft | Continuous, strongest target |
+| `idle` | Low Power | 4×4 | 2 / 1–2 | ~3 ft | Autonomous, 5 ms integration |
+| `inspect` | Far Detail | 8×8 | 5 / 5–10 | ~5 ft | Continuous, plus signal/ambient/target diagnostics |
+
+Display names reflect the user-reported SR Front tests on 2026-10-02.
+Observed ranges are not guaranteed limits and do not apply to other rates.
+CLI and firmware identifiers remain unchanged.
+
+```bash
+npm run helm -- vehicle-wide-tof Truck status
+npm run helm -- vehicle-wide-tof Truck detail
+npm run helm -- vehicle-wide-tof Truck navigation --hz 15
+npm run helm -- vehicle-wide-tof Truck fast --hz 60
+npm run helm -- vehicle-wide-tof Truck idle --hz 1
+npm run helm -- vehicle-wide-tof Truck inspect
+npm run helm -- vehicle-wide-tof Truck frame
+```
+
+`4x4` aliases `fast`; `8x8` aliases `detail`. `frame` returns the latest
+cached frame and its age, resolution, profile, requested frequency, frame
+sequence, and last captured-frame interval. Inspect frames also contain
+per-zone `signalKcpsPerSpad`, `ambientKcpsPerSpad`, `targetCount`, and the
+usual `targetStatus`. These are driver-reported values, not calibrated
+obstacle decisions. Capture throughput may fall below the requested sensor
+rate because of I²C, scheduling, or HTTP load.
+
+Agents should select Detail when stopped/observing, Navigation for normal
+travel, Fast for faster motion, Idle when unused, and Inspect for diagnosing
+returns. Profiles are explicit choices; motor commands do not change them.
+The board boots into Low Power (`idle`): 4×4 at 2 Hz, autonomous ranging,
+with a 5 ms integration time. Runtime changes last until changed or rebooted.
+Updated sensor-board firmware is required; Helm does not flash it automatically.
+
 ## PSF Sensor Board v1.3 relative orientation
 
 `GET /imu` includes boot-relative roll, pitch, and yaw after the board has

@@ -3,7 +3,7 @@
   "name": "GSN Robotics - PSF Sensor Board v1.3 (bring-up)",
   "description": "ESP32-S3-CAM bring-up for PSF Sensor Board v1.3: camera, three ToF devices, IMU, experimental microphones, streamed speaker PCM, boot chime, and RGBW LEDs. No motor or collision-control changes.",
   "target": "esp32",
-  "fqbn": "esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=no_ota",
+  "fqbn": "esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=no_ota,LoopCore=1,EventsCore=0",
   "core": "esp32:esp32",
   "libraries": [
     { "name": "Adafruit VL53L5CX", "version": "1.0.1" }

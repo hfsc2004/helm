@@ -26,6 +26,8 @@ const CH = {
   vehicleCmd: "vehicle:cmd",
   vehicleStop: "vehicle:stop",
   vehicleSensorBoardSnapshot: "vehicle:sensor-board-snapshot",
+  vehicleSensorBoardWideConfigure: "vehicle:sensor-board-wide-configure",
+  vehicleSensorBoardWideSnapshot: "vehicle:sensor-board-wide-snapshot",
   vehicleSensorBoardUno: "vehicle:sensor-board-uno",
   vehicleStreamStateOpen: "vehicle:stream-state-open",
   vehicleStreamStateClose: "vehicle:stream-state-close",
@@ -66,6 +68,8 @@ const api = {
     cmd: (req: unknown) => ipcRenderer.invoke(CH.vehicleCmd, req),
     stop: (req: unknown) => ipcRenderer.invoke(CH.vehicleStop, req),
     sensorBoardSnapshot: (req: unknown) => ipcRenderer.invoke(CH.vehicleSensorBoardSnapshot, req),
+    sensorBoardWideConfigure: (req: unknown) => ipcRenderer.invoke(CH.vehicleSensorBoardWideConfigure, req),
+    sensorBoardWideSnapshot: (req: unknown) => ipcRenderer.invoke(CH.vehicleSensorBoardWideSnapshot, req),
     sensorBoardUno: (req: unknown) => ipcRenderer.invoke(CH.vehicleSensorBoardUno, req),
     streamState: async (req: unknown, onEvent: (e: unknown) => void) => {
       const handle = (await ipcRenderer.invoke(CH.vehicleStreamStateOpen, req)) as {

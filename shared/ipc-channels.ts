@@ -1,3 +1,4 @@
+import type { LightScript, LightPlayback } from "./light-scripts.js";
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Pseudo Science Fiction
 /**
@@ -390,7 +391,25 @@ export interface VehicleMutationResponse {
   error?: string;
 }
 
+export interface AudioLibraryEntry { id: string; name: string; }
+export interface AudioLibraryResponse { entries: AudioLibraryEntry[]; }
 export interface HelmAPI {
+  lights: {
+    list(): Promise<LightScript[]>;
+    get(id: string): Promise<LightScript>;
+    save(script: LightScript): Promise<LightScript>;
+    remove(id: string): Promise<void>;
+    editor(id?: string): Promise<void>;
+    play(req: { vehicleId: string; scriptId: string; loop?: boolean }): Promise<void>;
+    stop(): Promise<void>;
+    status(): Promise<LightPlayback>;
+  };
+  audio: {
+    list(): Promise<AudioLibraryResponse>;
+    add(): Promise<AudioLibraryResponse>;
+    remove(id: string): Promise<AudioLibraryResponse>;
+    play(req: { vehicleId: string; audioId: string }): Promise<void>;
+  };
   app: {
     getVersion(): Promise<string>;
   };
@@ -457,6 +476,8 @@ export const IPC = {
   app: {
     getVersion: "app:get-version",
   },
+  lights: { list: "lights:list", get: "lights:get", save: "lights:save", remove: "lights:remove", editor: "lights:editor", play: "lights:play", stop: "lights:stop", status: "lights:status" },
+  audio: { list: "audio:list", add: "audio:add", remove: "audio:remove", play: "audio:play" },
   vehicle: {
     list: "vehicle:list",
     add: "vehicle:add",

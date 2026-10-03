@@ -13,6 +13,8 @@
   import AudioFeed from "../components/AudioFeed.svelte";
   import ActivityLog from "../components/ActivityLog.svelte";
   import SensorBoardReadouts from "../components/SensorBoardReadouts.svelte";
+  import LightLibrary from "../components/LightLibrary.svelte";
+  import AudioLibrary from "../components/AudioLibrary.svelte";
   import UnoKeyboard from "../components/UnoKeyboard.svelte";
   import { hasDriveControl } from "@shared/vehicle-contract";
 
@@ -68,6 +70,9 @@
       <StateReadouts />
       <ActivityLog />
     {/if}
+    {#if selectedVehicle?.sensorBoardRevision === "1.3"}
+      <div class="audio-library"><AudioLibrary vehicleId={selectedVehicle.id} /><LightLibrary vehicleId={selectedVehicle.id} /></div>
+    {/if}
   </aside>
 </div>
 
@@ -96,7 +101,10 @@
     justify-content: center;
     overflow: hidden;
   }
+  .audio-library { margin-top: auto; }
   .rail {
+    display: flex;
+    flex-direction: column;
     background: var(--surface);
     border-left: 1px solid var(--border);
     overflow-y: auto;

@@ -235,6 +235,11 @@ separate drive ESP32 is assumed for this v1.3 bring-up configuration.
   On the tested board, index 0 is upper right, index 1 is upper left, and
   index 2 is lower right from the truck's forward-facing perspective (looking
   away from the observer).
+- IR bank control: `GET /ir` reports the expander P5 state;
+  `POST /ir?enabled=0|1` controls all three 940 nm emitters together. SW1 must
+  be in expander mode (positions 1–2). The endpoint preserves the expander's
+  sensor, speaker, and auxiliary bits and never repurposes camera GPIO4.
+  This addition needs a firmware flash before IR scripts can play.
 - The TCA9534 uses P0–P1 for the two VL53L1CB XSHUT lines, P2 for VL53L5CX
   LPn, P3 for VL53L5CX I2C_RST, and P4 for the speaker amplifier SD_MODE#.
   P0–P4 are outputs; P5–P7 remain inputs. On the bring-up-9 bench flash,
@@ -425,3 +430,90 @@ included in this repository.
 GPIO4 is shared with the camera SCCB connection; leave the IR switch in its
 default expander-controlled position while the camera is active. The speaker
 terminals are differential; neither is ground.
+
+### Microphone Data/Clock line Test
+
+Normal PDM capture is the boot default. Remote holds persist until `restore`
+or reboot, allowing time for a multimeter reading:
+
+```bash
+npm run helm -- vehicle-mic-clock Truck data-high # GPIO14 weak pull-up
+npm run helm -- vehicle-mic-clock Truck data-low  # GPIO14 weak pull-down
+npm run helm -- vehicle-mic-clock Truck data-float # GPIO14 input, both pulls disabled
+npm run helm -- vehicle-mic-clock Truck high      # GPIO21 steady HIGH
+npm run helm -- vehicle-mic-clock Truck low       # GPIO21 steady LOW
+npm run helm -- vehicle-mic-clock Truck status
+npm run helm -- vehicle-mic-clock Truck restore
+```
+
+DATA tests stop PDM capture and hold CLK low, wait 25 ms, then apply a weak
+internal pull to GPIO14 as an input. DATA is never actively driven. An unloaded
+line should approach 3.3 V with pull-up or 0 V with pull-down; loading or a short
+can prevent this. Switching to a CLK hold releases the DATA pull. Restore releases
+both pads and restarts PDM capture. Audio capture is unavailable during holds;
+other sensor/network operations continue. Health/diagnostics expose test state.
+
+HTTP on diagnostics port 82: `GET /mic-line-hold`, `POST /mic-data-high`,
+`POST /mic-data-low`, existing `POST /mic-clock-high|low`, and
+`POST /mic-line-restore` (alias of `/mic-clock-restore`).
+
+`data-clock` requires an active `data-float` hold. It starts an independent
+2.048 MHz, 50% duty clock on GPIO21 without touching GPIO14 configuration.
+PDM capture stays off, DATA stays an input with no pulls, and the clock runs
+until another hold, restore, or reboot. `status` reports `independentClockHz`
+and `dataFloating`. HTTP: `POST /mic-data-clock`.
+
+`helm vehicle-mic-clock Truck gpio` (`GET /mic-gpio`) returns GPIO14 hardware
+configuration captured immediately after the final PDM RX enable, plus a live
+read-only snapshot. Includes direction, input/output enable, pulls, IOMUX
+function, output signal/OE selection, and all matrix inputs selecting GPIO14.
+The post-enable snapshot is also printed on Serial and refreshed on restore.
+ESP32-S3 I2S0 DATA input signal index is 25; GPIO output signal index is 256.
+An output signal assignment alone does not mean output is enabled.
+
+### Timed RX-enable comparison
+
+`helm vehicle-mic-clock Truck compare-start` starts a two-phase diagnostic;
+`compare-status` returns phase, elapsed time, actual hold durations, errors,
+and the GPIO14 snapshots immediately before/after RX enable and at the end.
+Start from restored normal capture. Other holds must be restored first.
+
+The normal master PDM clock is tied to RX enable, so this diagnostic uses one
+continuous LEDC 2.048 MHz 50% clock on GPIO21 and a separately configured PDM
+**slave** RX channel, with GPIO21 routed to its clock input. It is not the
+normal master-mode clock generator. The slave channel is prepared but disabled
+before measurements. GPIO14 is input-only with both pulls disabled, with DATA
+routing already established. After 100 ms wake-up, clock-only holds for at least
+30 seconds. The transition only calls `i2s_channel_enable()`; it does not change
+GPIO14 direction/pulls or stop/reassign the clock. RX then holds at least another
+30 seconds. Normal master-mode capture is restored automatically afterward.
+`restore` cancels early. Other line holds also cancel the comparison.
+
+HTTP: `POST /mic-rx-comparison` starts; `GET /mic-rx-comparison` reads retained
+logs. The loop advances phases without blocking HTTP or other sensors. Driver
+setup can fail (reported with normal capture restoration attempted); hardware
+clock continuity and timing must be verified on the installed diagnostic.
+
+For operator-stepped GPIO/I2S restore checkpoints, use `trace-start`,
+`trace-status`, `trace-next --step N`, and `trace-abort` with `vehicle-mic-clock`.
+See the firmware [restore investigation](MIC-RESTORE-TRACE.md) for operation
+order, hardware fields, and measurement procedure. Checkpoints wait for explicit
+advancement; boot and ordinary restoration remain automatic.
+
+
+### Concurrent speaker playback and light shows
+
+Updated firmware serves streaming PCM on port 83 in a dedicated HTTP task on
+core 0. Diagnostics, LED/IR commands, and sensor scheduling remain on core 1,
+so a long audio upload does not monopolize their port-82 request handler. The
+speaker's existing 32 KiB queue and I2S worker are retained. I2C access during
+speaker preparation is serialized with the sensor/control loop; the lock is
+released before streaming audio. A speaker lock rejects competing uploads,
+tones, chimes, and startup sequences without modifying the active upload.
+
+`GET :83/health` identifies `psf-speaker`; `POST :83/speaker-pcm` accepts the
+same PCM upload format as before. The port-82 endpoint remains compatible with
+older clients but still blocks other diagnostics while uploading. Helm and the
+CLI probe port 83 automatically and fall back to 82 for older firmware.
+Compilation and desktop transport checks do not establish on-robot timing:
+flash this build, restart Helm, then verify a light show during a long sound.

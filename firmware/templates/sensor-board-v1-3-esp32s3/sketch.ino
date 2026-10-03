@@ -13,6 +13,17 @@
 #include <esp32-hal-ledc.h>
 #include <ESP_I2S.h>
 #include <driver/gpio.h>
+#include <soc/gpio_struct.h>
+#include <soc/pcnt_periph.h>
+#include <esp_timer.h>
+#include <esp_heap_caps.h>
+#include "src/mic_activity_types.h"
+#include <soc/gpio_periph.h>
+#include <soc/io_mux_reg.h>
+#include <soc/i2s_struct.h>
+#include "src/mic_trace_i2s/MicTraceI2S.h"
+#include <esp_rom_gpio.h>
+#include <soc/gpio_sig_map.h>
 #include <driver/i2s_pdm.h>
 #include <driver/pulse_cnt.h>
 #include <freertos/FreeRTOS.h>
@@ -90,6 +101,7 @@ static constexpr uint8_t LED_PIN = 48;
 static constexpr uint8_t LED_COUNT = 3;
 static constexpr uint8_t CAMERA_PORT = 81;
 static constexpr uint8_t DIAGNOSTIC_PORT = 82;
+static constexpr uint8_t SPEAKER_PORT = 83;
 // Uno TX reaches GPIO44 through the 5 V-to-3.3 V divider; GPIO43 drives Uno RX.
 static constexpr uint8_t UNO_UART_DEFAULT_RX = 44;
 static constexpr uint8_t UNO_UART_DEFAULT_TX = 43;
@@ -107,6 +119,12 @@ static constexpr int CAM_VSYNC = 6, CAM_HREF = 7, CAM_PCLK = 13;
 
 WebServer cameraServer(CAMERA_PORT);
 WebServer diagnosticServer(DIAGNOSTIC_PORT);
+WebServer speakerServer(SPEAKER_PORT);
+SemaphoreHandle_t boardIoMutex = nullptr;
+SemaphoreHandle_t speakerControlMutex = nullptr;
+bool speakerHttpReady = false;
+bool dedicatedSpeakerUploadAccepted = false;
+bool legacySpeakerUploadAccepted = false;
 bool cameraReady = false;
 bool cameraMirrored = false;
 bool expanderReady = false;
@@ -116,8 +134,48 @@ bool rearTofReady = false;
 bool wideTofReady = false;
 bool imuReady = false;
 bool microphonesReady = false;
+String micGpio14PostEnable = "null";
+uint32_t micGpio14PostEnableMs = 0;
 bool micClockHeld = false;
 int micClockHeldLevel = -1;
+int micDataHeldLevel = -1; // weak pull only; clock stopped during DATA tests
+bool micDataFloating = false;
+bool micIndependentClockRunning = false;
+i2s_chan_handle_t micComparisonRx = nullptr;
+bool micComparisonRxEnabled = false;
+uint8_t micComparisonPhase = 0; // 0 inactive, 1 clock-only, 2 RX enabled
+uint32_t micComparisonPhaseAt = 0;
+String micComparisonResult = "idle";
+String micComparisonBefore = "null", micComparisonAfter = "null", micComparisonEnd = "null";
+uint32_t micComparisonFirstDuration = 0, micComparisonSecondDuration = 0;
+String micComparisonError;
+bool micTraceRequested = false;
+volatile bool micTraceRunning = false, micTraceAbort = false;
+TaskHandle_t micTraceTask = nullptr;
+SemaphoreHandle_t micTraceMutex = nullptr;
+SemaphoreHandle_t micTraceProceed = nullptr;
+bool micTraceWaiting = false;
+uint32_t micTraceCheckpointAt = 0;
+uint8_t micTraceCount = 0;
+static constexpr uint8_t MIC_TRACE_CAPACITY = 40;
+String micTraceLogs[MIC_TRACE_CAPACITY];
+String micTraceState = "idle";
+bool micActivityRequested = false;
+volatile bool micActivityActive = false, micActivityStopRequested = false;
+SemaphoreHandle_t micActivityMutex = nullptr, micActivityStopped = nullptr;
+MicActivityCounter micActivityData, micActivityClock;
+static constexpr uint16_t MIC_ACTIVITY_FIRST_CAPACITY = 512;
+static constexpr uint16_t MIC_ACTIVITY_RECENT_CAPACITY = 128;
+MicActivityBin micActivityFirst[MIC_ACTIVITY_FIRST_CAPACITY], micActivityRecent[MIC_ACTIVITY_RECENT_CAPACITY];
+uint16_t micActivityFirstCount = 0, micActivityRecentCount = 0, micActivityRecentHead = 0;
+uint32_t micActivityCounterClears = 0;
+int64_t micActivityStartedUs = 0, micActivityLastNonzeroUs = 0;
+int64_t micActivityDisableBeginUs = 0, micActivityDisableEndUs = 0;
+uint64_t micActivityEdgesAtDisableBegin = 0, micActivityEdgesAtDisableEnd = 0;
+String micActivityError, micActivityGpioBefore = "null", micActivityGpioAfter = "null";
+
+
+
 bool speakerReady = false;
 bool speakerAmpEnabled = false;
 bool startupChimePlayed = false;
@@ -137,7 +195,7 @@ uint32_t frontTofInvalidSince = 0;
 uint32_t rearTofInvalidSince = 0;
 NarrowTofSample frontTofSample, rearTofSample;
 Adafruit_VL53L5CX wideTof;
-I2SClass microphoneI2s;
+MicTraceI2SClass microphoneI2s;
 I2SClass speakerI2s;
 HardwareSerial unoUart(1);
 bool unoUartReady = false;
@@ -161,6 +219,7 @@ QueueHandle_t speakerQueue = nullptr;
 volatile uint32_t speakerPcmQueuedBytes = 0;
 volatile uint32_t speakerPcmPlayedBytes = 0;
 volatile bool speakerPcmStreaming = false;
+volatile bool speakerPcmPreparing = false;
 volatile bool speakerPcmUploadComplete = false;
 volatile bool speakerPcmUploadFailed = false;
 uint8_t speakerPcmPending[4] = {};
@@ -262,13 +321,162 @@ void initImu() {
   Serial.printf("IMU WHO_AM_I=0x%02X ready=%d\n", identity, imuReady);
 }
 
+// Read hardware configuration without changing direction, pulls, or routing.
+String readMicrophoneGpio(uint8_t pin) {
+  gpio_io_config_t config = {};
+  const esp_err_t error = gpio_get_io_config(static_cast<gpio_num_t>(pin), &config);
+  if (error != ESP_OK) return "{\"ok\":false,\"error\":\"" + String(esp_err_to_name(error)) + "\"}";
+  String body = "{\"ok\":true,\"pin\":" + String(pin);
+  const char *direction = config.ie ? (config.oe ? "input-output" : "input") : (config.oe ? "output" : "disabled");
+  body += ",\"direction\":\"" + String(direction) + "\"";
+  body += ",\"inputEnable\":" + String(config.ie ? "true" : "false");
+  body += ",\"outputEnable\":" + String(config.oe ? "true" : "false");
+  body += ",\"pullUp\":" + String(config.pu ? "true" : "false");
+  body += ",\"pullDown\":" + String(config.pd ? "true" : "false");
+  body += ",\"iomuxRaw\":" + String(REG_READ(GPIO_PIN_MUX_REG[pin]));
+  body += ",\"gpioPinRaw\":" + String(GPIO.pin[pin].val);
+  body += ",\"outputMatrixRaw\":" + String(GPIO.func_out_sel_cfg[pin].val);
+  body += ",\"iomuxFunction\":" + String(config.fun_sel);
+  body += ",\"outputSignalIndex\":" + String(config.sig_out);
+  body += ",\"outputEnableControlledByPeripheral\":" + String(config.oe_ctrl_by_periph ? "true" : "false");
+  body += ",\"outputEnableInverted\":" + String(config.oe_inv ? "true" : "false");
+  body += ",\"gpioOutputEnableBit\":" + String((GPIO.enable >> pin) & 1U);
+  if (pin == MIC_PDM_DATA) body += ",\"expectedI2s0DataSignalIndex\":" + String(I2S0I_SD_IN_IDX);
+  body += ",\"inputMatrixSignals\":[";
+  bool first = true;
+  for (uint16_t index = 0; index < 256; ++index) {
+    const uint32_t raw = GPIO.func_in_sel_cfg[index].val;
+    if (!(raw & (1U << 7)) || (raw & 0x3fU) != pin) continue;
+    if (!first) body += ',';
+    first = false;
+    body += "{\"signalIndex\":" + String(index);
+    body += ",\"inverted\":" + String((raw & (1U << 6)) ? "true" : "false");
+    body += ",\"rawRegister\":" + String(raw) + '}';
+  }
+  body += "]}";
+  return body;
+}
+
+String readMicrophoneDataGpio() { return readMicrophoneGpio(MIC_PDM_DATA); }
+
+void sendMicrophoneGpio() {
+  String body = "{\"ok\":true,\"postEnableCapturedMs\":" + String(micGpio14PostEnableMs);
+  body += ",\"postEnable\":" + micGpio14PostEnable;
+  body += ",\"current\":" + readMicrophoneDataGpio() + '}';
+  diagnosticServer.send(200, "application/json", body);
+}
+
+
+String readMicrophoneRestoreHardware() {
+  String body = "{\"gpio14\":" + readMicrophoneDataGpio();
+  body += ",\"gpio21\":" + readMicrophoneGpio(MIC_PDM_CLK);
+  body += ",\"i2s0\":{\"rxConfRaw\":" + String(I2S0.rx_conf.val);
+  body += ",\"rxConf1Raw\":" + String(I2S0.rx_conf1.val);
+  body += ",\"clockConfRaw\":" + String(I2S0.rx_clkm_conf.val);
+  body += ",\"clockDivRaw\":" + String(I2S0.rx_clkm_div_conf.val);
+  body += ",\"slotMaskRaw\":" + String(I2S0.rx_tdm_ctrl.val);
+  body += ",\"timingRaw\":" + String(I2S0.rx_timing.val);
+  body += ",\"rxStart\":" + String(I2S0.rx_conf.rx_start);
+  body += ",\"slave\":" + String(I2S0.rx_conf.rx_slave_mod);
+  body += ",\"pdmEnabled\":" + String(I2S0.rx_conf.rx_pdm_en);
+  body += ",\"pdmToPcmEnabled\":" + String(I2S0.rx_conf.rx_pdm2pcm_en);
+  body += ",\"decimation16S\":" + String(I2S0.rx_conf.rx_pdm_sinc_dsr_16_en);
+  body += ",\"mono\":" + String(I2S0.rx_conf.rx_mono);
+  body += ",\"dataBits\":" + String(I2S0.rx_conf1.rx_bits_mod + 1);
+  body += ",\"slotBits\":" + String(I2S0.rx_conf1.rx_tdm_chan_bits + 1);
+  body += ",\"clockActive\":" + String(I2S0.rx_clkm_conf.rx_clk_active);
+  body += ",\"clockSourceSelector\":" + String(I2S0.rx_clkm_conf.rx_clk_sel);
+  body += ",\"clockDividerInteger\":" + String(I2S0.rx_clkm_conf.rx_clkm_div_num);
+  body += ",\"clockDividerX\":" + String(I2S0.rx_clkm_div_conf.rx_clkm_div_x);
+  body += ",\"clockDividerY\":" + String(I2S0.rx_clkm_div_conf.rx_clkm_div_y);
+  body += ",\"clockDividerZ\":" + String(I2S0.rx_clkm_div_conf.rx_clkm_div_z);
+  body += ",\"clockDividerYn1\":" + String(I2S0.rx_clkm_div_conf.rx_clkm_div_yn1);
+  body += ",\"bckDivider\":" + String(I2S0.rx_conf1.rx_bck_div_num + 1) + '}';
+  i2s_chan_handle_t handle = micComparisonRx ? micComparisonRx : microphoneI2s.rxChan();
+  body += ",\"driver\":";
+  if (!handle) body += "null";
+  else {
+    i2s_chan_info_t info = {};
+    const esp_err_t error = i2s_channel_get_info(handle, &info);
+    body += "{\"queryError\":\"" + String(esp_err_to_name(error)) + "\"";
+    if (error == ESP_OK) {
+      body += ",\"port\":" + String(static_cast<int>(info.id));
+      body += ",\"role\":" + String(static_cast<int>(info.role));
+      body += ",\"mode\":" + String(static_cast<int>(info.mode));
+      body += ",\"direction\":" + String(static_cast<int>(info.dir));
+      body += ",\"enabled\":" + String(info.is_enabled ? "true" : "false");
+      body += ",\"initialized\":" + String(info.mode_cfg ? "true" : "false");
+      body += ",\"dmaBytes\":" + String(info.total_dma_buf_size);
+      body += ",\"clockSource\":" + String(static_cast<int>(info.clk_src));
+      body += ",\"sourceHz\":" + String(info.sclk_hz);
+      body += ",\"mclkHz\":" + String(info.mclk_hz);
+      body += ",\"bclkHz\":" + String(info.bclk_hz);
+      if (info.mode_cfg && info.mode == I2S_COMM_MODE_PDM && info.dir == I2S_DIR_RX) {
+        const auto *config = static_cast<const i2s_pdm_rx_config_t *>(info.mode_cfg);
+        body += ",\"sampleRate\":" + String(config->clk_cfg.sample_rate_hz);
+        body += ",\"decimation\":" + String(static_cast<int>(config->clk_cfg.dn_sample_mode));
+        body += ",\"slotMode\":" + String(static_cast<int>(config->slot_cfg.slot_mode));
+        body += ",\"slotMask\":" + String(static_cast<int>(config->slot_cfg.slot_mask));
+        body += ",\"dataBits\":" + String(static_cast<int>(config->slot_cfg.data_bit_width));
+        body += ",\"clockPin\":" + String(static_cast<int>(config->gpio_cfg.clk));
+        body += ",\"dataPin\":" + String(static_cast<int>(config->gpio_cfg.din));
+        body += ",\"clockInverted\":" + String(config->gpio_cfg.invert_flags.clk_inv ? "true" : "false");
+      }
+    }
+    body += '}';
+  }
+  body += ",\"wrapper\":{\"rxSampleRate\":" + String(microphoneI2s.rxSampleRate());
+  body += ",\"rxDataWidth\":" + String(static_cast<int>(microphoneI2s.rxDataWidth()));
+  body += ",\"rxSlotMode\":" + String(static_cast<int>(microphoneI2s.rxSlotMode())) + '}';
+  body += ",\"independentClockHz\":" + String(micIndependentClockRunning ? ledcReadFreq(MIC_PDM_CLK) : 0) + '}';
+  return body;
+}
+
+// Called only AFTER an operation has returned, including calls inside begin().
+// Normal boot/restore does not pause: only the opt-in trace task activates it.
+void psfMicRestoreCheckpoint(void *owner, const char *operation, int result) {
+  if (!micTraceRunning || xTaskGetCurrentTaskHandle() != micTraceTask || micTraceAbort) return;
+  if (owner && owner != &microphoneI2s) return;
+  const bool activityBaseline = micActivityRequested && String(operation) == "baseline: end of Phase 2 before restore";
+  if (activityBaseline) {
+    micActivityRequested = false;
+    if (!startMicrophoneActivityMonitor()) {
+      micTraceAbort = true;
+      return;
+    }
+    delay(100); // collect a pre-disable baseline with counters already running
+  }
+  const String hardware = readMicrophoneRestoreHardware();
+  xSemaphoreTake(micTraceMutex, portMAX_DELAY);
+  if (micTraceCount >= MIC_TRACE_CAPACITY) {
+    micTraceAbort = true;
+    micTraceState = "log-capacity-exceeded";
+    xSemaphoreGive(micTraceMutex);
+    return;
+  }
+  const uint8_t index = micTraceCount++;
+  micTraceLogs[index] = "{\"step\":" + String(index) + ",\"operation\":\"" + String(operation);
+  micTraceLogs[index] += "\",\"returnValue\":" + String(result);
+  micTraceLogs[index] += ",\"capturedMs\":" + String(millis()) + ",\"hardware\":" + hardware + '}';
+  micTraceCheckpointAt = millis();
+  micTraceWaiting = !activityBaseline;
+  micTraceState = activityBaseline ? "advancing-to-rx-off" : "paused";
+  xSemaphoreGive(micTraceMutex);
+  if (activityBaseline) return; // only checkpoint 0; checkpoint 1 still waits indefinitely
+  // No timeout: operator has as long as needed to read the meter.
+  xSemaphoreTake(micTraceProceed, portMAX_DELAY);
+}
+
 void initMicrophones() {
   // The two MSM261DHP006 parts share clock/data and have opposite L/R straps.
   // GPIO21/GPIO14 follow the v1.3 schematic, not the older Rev A notes.
   microphoneI2s.setPinsPdmRx(MIC_PDM_CLK, MIC_PDM_DATA);
+  psfMicRestoreCheckpoint(nullptr, "setPinsPdmRx(GPIO21,GPIO14)", 0);
   microphoneI2s.setTimeout(1000);
+  psfMicRestoreCheckpoint(nullptr, "setTimeout(1000)", 0);
   microphonesReady = microphoneI2s.begin(I2S_MODE_PDM_RX, MIC_SAMPLE_RATE,
     I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
+  psfMicRestoreCheckpoint(nullptr, "begin(PDM_RX,16000,16bit,stereo) returned", microphonesReady);
   if (!microphonesReady) {
     Serial.println("PDM microphone I2S initialization failed");
     return;
@@ -287,13 +495,21 @@ void initMicrophones() {
   i2s_pdm_rx_clk_config_t clockConfig = I2S_PDM_RX_CLK_DEFAULT_CONFIG(MIC_SAMPLE_RATE);
   clockConfig.dn_sample_mode = I2S_PDM_DSR_16S;
   const esp_err_t stopped = i2s_channel_disable(rx);
+  psfMicRestoreCheckpoint(nullptr, "disable normal master RX", stopped);
   if (stopped != ESP_OK) {
     microphonesReady = false;
     Serial.printf("PDM clock reconfiguration stop failed: %s\n", esp_err_to_name(stopped));
     return;
   }
   const esp_err_t configured = i2s_channel_reconfig_pdm_rx_clock(rx, &clockConfig);
+  psfMicRestoreCheckpoint(nullptr, "reconfigure normal clock to 16S / 2.048MHz", configured);
   const esp_err_t started = i2s_channel_enable(rx);
+  psfMicRestoreCheckpoint(nullptr, "enable normal master RX at 2.048MHz", started);
+  if (started == ESP_OK) {
+    micGpio14PostEnable = readMicrophoneDataGpio();
+    micGpio14PostEnableMs = millis();
+    Serial.printf("GPIO14 immediately after PDM RX enable: %s\n", micGpio14PostEnable.c_str());
+  }
   microphonesReady = configured == ESP_OK && started == ESP_OK;
   Serial.printf("PDM microphones ready=%d clock=%lu Hz config=%s start=%s\n",
     microphonesReady, static_cast<unsigned long>(MIC_PDM_CLOCK_HZ),
@@ -304,7 +520,7 @@ void speakerPlaybackTask(void *) {
   SpeakerPcmChunk chunk;
   bool started = false;
   for (;;) {
-    if (!speakerPcmStreaming) {
+    if (!speakerPcmStreaming || speakerPcmPreparing) {
       started = false;
       vTaskDelay(pdMS_TO_TICKS(1));
       continue;
@@ -729,8 +945,12 @@ void sendHealth() {
   body += ",\"rearTofReady\":" + String(rearTofReady ? "true" : "false");
   body += ",\"wideTofReady\":" + String(wideTofReady ? "true" : "false");
   body += ",\"imuReady\":" + String(imuReady ? "true" : "false");
+  body += ",\"micLineTestActive\":" + String(micClockHeld ? "true" : "false");
+  body += ",\"micDataPullLevel\":" + String(micDataHeldLevel);
+  body += ",\"micClockHeldLevel\":" + String(micClockHeldLevel);
   body += ",\"microphonesReady\":" + String(microphonesReady ? "true" : "false");
   body += ",\"speakerReady\":" + String(speakerReady ? "true" : "false");
+  body += ",\"speakerPort\":" + String(speakerHttpReady ? SPEAKER_PORT : DIAGNOSTIC_PORT);
   body += ",\"speakerAmpEnabled\":" + String(speakerAmpEnabled ? "true" : "false");
   body += ",\"startupChimePlayed\":" + String(startupChimePlayed ? "true" : "false");
   body += ",\"startupChimeStage\":\"" + String(startupChimeStage) + "\"";
@@ -830,8 +1050,12 @@ void sendDiagnostics() {
   body += ",\"rearTofReady\":" + String(rearTofReady ? "true" : "false");
   body += ",\"wideTofReady\":" + String(wideTofReady ? "true" : "false");
   body += ",\"imuReady\":" + String(imuReady ? "true" : "false");
+  body += ",\"micLineTestActive\":" + String(micClockHeld ? "true" : "false");
+  body += ",\"micDataPullLevel\":" + String(micDataHeldLevel);
+  body += ",\"micClockHeldLevel\":" + String(micClockHeldLevel);
   body += ",\"microphonesReady\":" + String(microphonesReady ? "true" : "false");
   body += ",\"speakerReady\":" + String(speakerReady ? "true" : "false");
+  body += ",\"speakerPort\":" + String(speakerHttpReady ? SPEAKER_PORT : DIAGNOSTIC_PORT);
   body += ",\"speakerAmpEnabled\":" + String(speakerAmpEnabled ? "true" : "false");
   body += ",\"startupChimePlayed\":" + String(startupChimePlayed ? "true" : "false");
   body += ",\"startupChimeStage\":\"" + String(startupChimeStage) + "\"";
@@ -1722,7 +1946,32 @@ void sendMicrophonePcntTest() {
   diagnosticServer.send(ok ? 200 : 500, "application/json", body);
 }
 
+void cancelMicrophoneComparison() {
+  micTraceRequested = false;
+  if (micComparisonRx) {
+    if (micComparisonRxEnabled) {
+      markMicrophoneActivityDisable(false);
+      const esp_err_t error = i2s_channel_disable(micComparisonRx);
+      markMicrophoneActivityDisable(true);
+      psfMicRestoreCheckpoint(nullptr, "disable diagnostic slave RX", error);
+    }
+    stopMicrophoneActivityMonitor();
+    const esp_err_t deleted = i2s_del_channel(micComparisonRx);
+    micComparisonRx = nullptr;
+    psfMicRestoreCheckpoint(nullptr, "delete diagnostic slave RX", deleted);
+  }
+  micComparisonRxEnabled = false;
+  if (micComparisonPhase) micComparisonResult = "cancelled";
+  micComparisonPhase = 0;
+}
+
 void holdMicrophoneClock(uint8_t level) {
+  cancelMicrophoneComparison();
+  if (micIndependentClockRunning) {
+    ledcDetach(MIC_PDM_CLK);
+    micIndependentClockRunning = false;
+  }
+  micDataFloating = false;
   if (!micClockHeld) {
     if (!microphonesReady || !microphoneI2s.end()) {
       diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"could not stop microphone I2S\"}");
@@ -1730,6 +1979,8 @@ void holdMicrophoneClock(uint8_t level) {
     }
     microphonesReady = false;
   }
+  gpio_reset_pin(static_cast<gpio_num_t>(MIC_PDM_DATA));
+  micDataHeldLevel = -1;
   // Claim the pad with the ESP-IDF GPIO driver after I2S releases it. This
   // also enables input readback while the output is held for a DMM check.
   const gpio_num_t pin = static_cast<gpio_num_t>(MIC_PDM_CLK);
@@ -1780,19 +2031,574 @@ void sendMicrophoneHeldClockEdges() {
   diagnosticServer.send(error == ESP_OK ? 200 : 500, "application/json", body);
 }
 
-void restoreMicrophoneClock() {
-  if (!micClockHeld) {
-    diagnosticServer.send(200, "application/json", "{\"ok\":true,\"held\":false,\"pdmCaptureRestored\":" + String(microphonesReady ? "true" : "false") + '}');
-    return;
+bool restoreMicrophoneCapture() {
+  psfMicRestoreCheckpoint(nullptr, "baseline: end of Phase 2 before restore", 0);
+  cancelMicrophoneComparison();
+  if (!micClockHeld) return microphonesReady;
+  if (micIndependentClockRunning) {
+    const bool detached = ledcDetach(MIC_PDM_CLK);
+    micIndependentClockRunning = false;
+    psfMicRestoreCheckpoint(nullptr, "detach LEDC clock on GPIO21", detached);
   }
-  gpio_reset_pin(static_cast<gpio_num_t>(MIC_PDM_CLK));
+  micIndependentClockRunning = false;
+  micDataFloating = false;
+  const esp_err_t resetClock = gpio_reset_pin(static_cast<gpio_num_t>(MIC_PDM_CLK));
+  psfMicRestoreCheckpoint(nullptr, "gpio_reset_pin(GPIO21)", resetClock);
+  const esp_err_t resetData = gpio_reset_pin(static_cast<gpio_num_t>(MIC_PDM_DATA));
+  psfMicRestoreCheckpoint(nullptr, "gpio_reset_pin(GPIO14)", resetData);
+  micDataHeldLevel = -1;
   micClockHeld = false;
   micClockHeldLevel = -1;
   initMicrophones();
-  const bool ok = microphonesReady;
+  psfMicRestoreCheckpoint(nullptr, "normal initMicrophones returned", microphonesReady);
+  return microphonesReady;
+}
+
+void restoreMicrophoneClock() {
+  const bool ok = restoreMicrophoneCapture();
   diagnosticServer.send(ok ? 200 : 500, "application/json",
     "{\"ok\":" + String(ok ? "true" : "false") +
     ",\"held\":false,\"pdmCaptureRestored\":" + String(ok ? "true" : "false") + '}');
+}
+
+// Microphone Data/Clock line Test: persistent until restore or reboot.
+// DATA remains an input with a weak pull; never actively drive mic outputs.
+void sendMicrophoneLineHoldStatus() {
+  String body = "{\"ok\":true,\"testActive\":" + String(micClockHeld ? "true" : "false");
+  body += ",\"clockPin\":" + String(MIC_PDM_CLK);
+  body += ",\"clockHeldLevel\":" + String(micClockHeldLevel);
+  body += ",\"dataPin\":" + String(MIC_PDM_DATA);
+  body += ",\"dataFloating\":" + String(micDataFloating ? "true" : "false");
+  body += ",\"independentClockHz\":" + String(micIndependentClockRunning ? ledcReadFreq(MIC_PDM_CLK) : 0);
+  body += ",\"dataPullLevel\":" + String(micDataHeldLevel);
+  body += ",\"dataPadLevel\":" + String(gpio_get_level(static_cast<gpio_num_t>(MIC_PDM_DATA)));
+  body += ",\"captureReady\":" + String(microphonesReady ? "true" : "false") + '}';
+  diagnosticServer.send(200, "application/json", body);
+}
+
+void holdMicrophoneData(int level) {
+  cancelMicrophoneComparison();
+  if (!micClockHeld) {
+    if (!microphonesReady || !microphoneI2s.end()) {
+      diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"could not stop microphone I2S\"}");
+      return;
+    }
+    microphonesReady = false;
+  }
+  if (micIndependentClockRunning) ledcDetach(MIC_PDM_CLK);
+  micIndependentClockRunning = false;
+  pinMode(MIC_PDM_CLK, OUTPUT);
+  digitalWrite(MIC_PDM_CLK, LOW);
+  micClockHeld = true;
+  micClockHeldLevel = 0;
+  delay(25); // allow microphone outputs to release after clock stops
+  gpio_reset_pin(static_cast<gpio_num_t>(MIC_PDM_DATA));
+  pinMode(MIC_PDM_DATA, level < 0 ? INPUT : level ? INPUT_PULLUP : INPUT_PULLDOWN);
+  micDataHeldLevel = level;
+  micDataFloating = level < 0;
+  delay(25);
+  sendMicrophoneLineHoldStatus();
+}
+
+void holdMicrophoneDataHigh() { holdMicrophoneData(1); }
+void holdMicrophoneDataLow() { holdMicrophoneData(0); }
+void holdMicrophoneDataFloat() { holdMicrophoneData(-1); }
+
+void startMicrophoneFloatingDataClock() {
+  if (!micClockHeld || !micDataFloating) {
+    diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"activate data-float first\"}");
+    return;
+  }
+  // Preserve GPIO14 exactly: only attach the clock generator on GPIO21.
+  if (!micIndependentClockRunning) {
+    const bool attached = ledcAttachChannel(MIC_PDM_CLK, MIC_PDM_CLOCK_HZ, 1, 7);
+    const bool running = attached && ledcWrite(MIC_PDM_CLK, 1);
+    if (!running) {
+      if (attached) ledcDetach(MIC_PDM_CLK);
+      pinMode(MIC_PDM_CLK, OUTPUT);
+      digitalWrite(MIC_PDM_CLK, LOW);
+      diagnosticServer.send(500, "application/json", "{\"ok\":false,\"error\":\"clock start failed; DATA unchanged\"}");
+      return;
+    }
+    micIndependentClockRunning = true;
+    micClockHeldLevel = -1; // clock is toggling rather than held at a DC level
+  }
+  delay(30);
+  sendMicrophoneLineHoldStatus();
+}
+
+void sendMicrophoneRxComparison() {
+  String body = "{\"ok\":true,\"phase\":\"" + micComparisonResult + "\"";
+  body += ",\"phaseElapsedMs\":" + String(micComparisonPhase ? millis() - micComparisonPhaseAt : 0);
+  body += ",\"clockSource\":\"LEDC continuous; PDM RX slave\"";
+  body += ",\"clockHz\":" + String(micIndependentClockRunning ? ledcReadFreq(MIC_PDM_CLK) : 0);
+  body += ",\"rxEnabled\":" + String(micComparisonRxEnabled ? "true" : "false");
+  body += ",\"firstHoldMs\":" + String(micComparisonFirstDuration);
+  body += ",\"secondHoldMs\":" + String(micComparisonSecondDuration);
+  body += ",\"beforeRxEnable\":" + micComparisonBefore;
+  body += ",\"afterRxEnable\":" + micComparisonAfter;
+  body += ",\"endRxHold\":" + micComparisonEnd;
+  body += ",\"error\":\"" + micComparisonError + "\"";
+  body += ",\"normalCaptureReady\":" + String(microphonesReady ? "true" : "false") + '}';
+  diagnosticServer.send(200, "application/json", body);
+}
+
+void startMicrophoneRxComparison() {
+  if (micComparisonPhase) {
+    diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"comparison already running\"}");
+    return;
+  }
+  if (micClockHeld) {
+    diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"restore other test holds before starting comparison\"}");
+    return;
+  }
+  if (!microphonesReady || !microphoneI2s.end()) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"normal capture must be ready; restore first\"}");
+    return;
+  }
+  microphonesReady = false;
+  micClockHeld = true;
+  micClockHeldLevel = 0;
+  micComparisonBefore = micComparisonAfter = micComparisonEnd = "null";
+  micComparisonError = "";
+  micComparisonFirstDuration = micComparisonSecondDuration = 0;
+  // Prepare the disabled slave receiver before the first measurement phase.
+  // clk=-1 prevents the I2S driver from touching the clock pad or generator.
+  i2s_chan_config_t channel = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_SLAVE);
+  esp_err_t error = i2s_new_channel(&channel, nullptr, &micComparisonRx);
+  if (error == ESP_OK) {
+    i2s_pdm_rx_config_t pdm = {};
+    pdm.clk_cfg = I2S_PDM_RX_CLK_DEFAULT_CONFIG(MIC_SAMPLE_RATE);
+    pdm.clk_cfg.dn_sample_mode = I2S_PDM_DSR_16S;
+    pdm.slot_cfg = I2S_PDM_RX_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
+    pdm.gpio_cfg.clk = static_cast<gpio_num_t>(-1);
+    pdm.gpio_cfg.din = static_cast<gpio_num_t>(MIC_PDM_DATA);
+    error = i2s_channel_init_pdm_rx_mode(micComparisonRx, &pdm);
+  }
+  if (error == ESP_OK) {
+    gpio_config_t data = {};
+    data.pin_bit_mask = 1ULL << MIC_PDM_DATA;
+    data.mode = GPIO_MODE_INPUT;
+    data.pull_up_en = GPIO_PULLUP_DISABLE;
+    data.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    data.intr_type = GPIO_INTR_DISABLE;
+    error = gpio_config(&data);
+  }
+  if (error == ESP_OK) {
+    const bool attached = ledcAttachChannel(MIC_PDM_CLK, MIC_PDM_CLOCK_HZ, 1, 7);
+    const bool running = attached && ledcWrite(MIC_PDM_CLK, 1);
+    if (running) {
+      micIndependentClockRunning = true;
+      micClockHeldLevel = -1;
+      gpio_input_enable(static_cast<gpio_num_t>(MIC_PDM_CLK));
+      esp_rom_gpio_connect_in_signal(MIC_PDM_CLK, I2S0I_WS_IN_IDX, false);
+    } else {
+      if (attached) ledcDetach(MIC_PDM_CLK);
+      error = ESP_FAIL;
+    }
+  }
+  if (error != ESP_OK) {
+    micComparisonError = esp_err_to_name(error);
+    restoreMicrophoneCapture();
+    micComparisonResult = "failed";
+    diagnosticServer.send(500, "application/json", "{\"ok\":false,\"error\":\"comparison setup failed: " + micComparisonError + "\"}");
+    return;
+  }
+  micDataHeldLevel = -1;
+  micDataFloating = true;
+  delay(100); // microphone wake-up before the full 30-second clock-only hold
+  micComparisonBefore = readMicrophoneDataGpio();
+  micComparisonPhaseAt = millis();
+  micComparisonPhase = 1;
+  micComparisonResult = "clock-only";
+  Serial.printf("Mic RX comparison clock-only: %s\n", micComparisonBefore.c_str());
+  sendMicrophoneRxComparison();
+}
+
+
+
+void releaseMicrophoneActivityCounter(MicActivityCounter &counter) {
+  if (counter.started) pcnt_unit_stop(counter.unit);
+  if (counter.enabled) pcnt_unit_disable(counter.unit);
+  if (counter.channel) pcnt_del_channel(counter.channel);
+  if (counter.unit) pcnt_del_unit(counter.unit);
+  if (counter.signalIndex >= 0) GPIO.func_in_sel_cfg[counter.signalIndex].val = counter.originalRouting;
+  counter.unit = nullptr;
+  counter.channel = nullptr;
+  counter.enabled = counter.started = false;
+}
+
+esp_err_t prepareMicrophoneActivityCounter(MicActivityCounter &counter, uint8_t pin, bool bothEdges) {
+  counter = MicActivityCounter{};
+  // Save only PCNT pulse-input routes; I2S matrix assignments are untouched.
+  uint32_t original[SOC_PCNT_UNITS_PER_GROUP * SOC_PCNT_CHANNELS_PER_UNIT] = {};
+  for (int unit = 0; unit < SOC_PCNT_UNITS_PER_GROUP; ++unit)
+    for (int channel = 0; channel < SOC_PCNT_CHANNELS_PER_UNIT; ++channel) {
+      const int signal = pcnt_periph_signals.groups[0].units[unit].channels[channel].pulse_sig;
+      original[unit * SOC_PCNT_CHANNELS_PER_UNIT + channel] = GPIO.func_in_sel_cfg[signal].val;
+    }
+  pcnt_unit_config_t config = {};
+  config.low_limit = -32768;
+  config.high_limit = 32767;
+  config.flags.accum_count = true;
+  esp_err_t error = pcnt_new_unit(&config, &counter.unit);
+  if (error != ESP_OK) return error;
+  pcnt_chan_config_t channelConfig = {};
+  channelConfig.edge_gpio_num = -1;
+  channelConfig.level_gpio_num = -1;
+  // First virtual ZERO, then recreate as virtual ONE. That produces a
+  // deterministic routing-register delta identifying this allocated channel.
+  error = pcnt_new_channel(counter.unit, &channelConfig, &counter.channel);
+  if (error != ESP_OK) return error;
+  uint32_t zeroRouting[SOC_PCNT_UNITS_PER_GROUP * SOC_PCNT_CHANNELS_PER_UNIT] = {};
+  for (int unit = 0; unit < SOC_PCNT_UNITS_PER_GROUP; ++unit)
+    for (int channel = 0; channel < SOC_PCNT_CHANNELS_PER_UNIT; ++channel) {
+      const int signal = pcnt_periph_signals.groups[0].units[unit].channels[channel].pulse_sig;
+      zeroRouting[unit * SOC_PCNT_CHANNELS_PER_UNIT + channel] = GPIO.func_in_sel_cfg[signal].val;
+    }
+  error = pcnt_del_channel(counter.channel);
+  counter.channel = nullptr;
+  if (error != ESP_OK) return error;
+  channelConfig.flags.virt_edge_io_level = 1;
+  error = pcnt_new_channel(counter.unit, &channelConfig, &counter.channel);
+  if (error != ESP_OK) return error;
+  int changed = 0;
+  for (int unit = 0; unit < SOC_PCNT_UNITS_PER_GROUP; ++unit)
+    for (int channel = 0; channel < SOC_PCNT_CHANNELS_PER_UNIT; ++channel) {
+      const int signal = pcnt_periph_signals.groups[0].units[unit].channels[channel].pulse_sig;
+      const int index = unit * SOC_PCNT_CHANNELS_PER_UNIT + channel;
+      if (GPIO.func_in_sel_cfg[signal].val != zeroRouting[index]) {
+        counter.signalIndex = signal;
+        counter.originalRouting = original[index];
+        ++changed;
+      }
+    }
+  if (changed != 1) return ESP_ERR_INVALID_STATE;
+  // This is the only connection to the real pad. It changes PCNT routing,
+  // not GPIO direction, IO_MUX, pulls, output enable, or I2S input routing.
+  esp_rom_gpio_connect_in_signal(pin, counter.signalIndex, false);
+  error = pcnt_channel_set_edge_action(counter.channel, PCNT_CHANNEL_EDGE_ACTION_INCREASE,
+    bothEdges ? PCNT_CHANNEL_EDGE_ACTION_INCREASE : PCNT_CHANNEL_EDGE_ACTION_HOLD);
+  if (error == ESP_OK) error = pcnt_unit_set_glitch_filter(counter.unit, nullptr);
+  if (error == ESP_OK) error = pcnt_unit_add_watch_point(counter.unit, 32767);
+  if (error == ESP_OK) error = pcnt_unit_enable(counter.unit);
+  counter.enabled = error == ESP_OK;
+  if (error == ESP_OK) error = pcnt_unit_clear_count(counter.unit);
+  if (error == ESP_OK) error = pcnt_unit_start(counter.unit);
+  counter.started = error == ESP_OK;
+  return error;
+}
+
+void sampleMicrophoneActivityCounter(MicActivityCounter &counter, uint32_t &delta, bool &cleared) {
+  int raw = 0;
+  const esp_err_t error = pcnt_unit_get_count(counter.unit, &raw);
+  if (error != ESP_OK) {
+    micActivityError = esp_err_to_name(error);
+    micActivityStopRequested = true;
+    delta = 0;
+    return;
+  }
+  const uint32_t current = static_cast<uint32_t>(raw);
+  delta = current - counter.previousRaw;
+  counter.total += delta;
+  counter.previousRaw = current;
+  // Long-running monitors stay below the driver's signed 32-bit limit.
+  // Clearing does not change any GPIO/clock state. Mark the small counting
+  // discontinuity explicitly; never interpret that interval as zero activity.
+  if (current >= 1000000000U) {
+    pcnt_unit_clear_count(counter.unit);
+    counter.previousRaw = 0;
+    cleared = true;
+    ++micActivityCounterClears;
+  }
+}
+
+void runMicrophoneActivityMonitor(void *) {
+  int64_t previousUs = micActivityStartedUs;
+  while (!micActivityStopRequested) {
+    vTaskDelay(pdMS_TO_TICKS(micActivityFirstCount < MIC_ACTIVITY_FIRST_CAPACITY ? 10 : 100));
+    MicActivityBin bin = {};
+    xSemaphoreTake(micActivityMutex, portMAX_DELAY);
+    sampleMicrophoneActivityCounter(micActivityData, bin.dataEdges, bin.counterCleared);
+    sampleMicrophoneActivityCounter(micActivityClock, bin.clockEdges, bin.counterCleared);
+    bin.endUs = esp_timer_get_time();
+    bin.durationUs = static_cast<uint32_t>(bin.endUs - previousUs);
+    previousUs = bin.endUs;
+    bin.rxEnabled = I2S0.rx_conf.rx_start;
+    bin.dataLevel = gpio_get_level(static_cast<gpio_num_t>(MIC_PDM_DATA));
+    if (bin.dataEdges) micActivityLastNonzeroUs = bin.endUs;
+    if (micActivityFirstCount < MIC_ACTIVITY_FIRST_CAPACITY) micActivityFirst[micActivityFirstCount++] = bin;
+    micActivityRecent[micActivityRecentHead] = bin;
+    micActivityRecentHead = (micActivityRecentHead + 1) % MIC_ACTIVITY_RECENT_CAPACITY;
+    if (micActivityRecentCount < MIC_ACTIVITY_RECENT_CAPACITY) ++micActivityRecentCount;
+    xSemaphoreGive(micActivityMutex);
+  }
+  // No real pin was assigned to the PCNT driver, so deletion cannot alter
+  // GPIO14 pulls. Release only the extra PCNT matrix taps.
+  xSemaphoreTake(micActivityMutex, portMAX_DELAY);
+  releaseMicrophoneActivityCounter(micActivityData);
+  releaseMicrophoneActivityCounter(micActivityClock);
+  micActivityActive = false;
+  xSemaphoreGive(micActivityMutex);
+  xSemaphoreGive(micActivityStopped);
+  vTaskDelete(nullptr);
+}
+
+bool startMicrophoneActivityMonitor() {
+  if (!micActivityMutex || !micActivityStopped || micActivityActive) return false;
+  gpio_io_config_t data = {}, clock = {};
+  gpio_get_io_config(static_cast<gpio_num_t>(MIC_PDM_DATA), &data);
+  gpio_get_io_config(static_cast<gpio_num_t>(MIC_PDM_CLK), &clock);
+  if (!data.ie || data.oe || data.pu || data.pd || !clock.ie || !micIndependentClockRunning) {
+    micActivityError = "requires input-only DATA with no pulls and the independent clock running";
+    return false;
+  }
+  micActivityGpioBefore = readMicrophoneDataGpio();
+  micActivityError = "";
+  micActivityFirstCount = micActivityRecentCount = micActivityRecentHead = 0;
+  micActivityCounterClears = 0;
+  micActivityLastNonzeroUs = micActivityDisableBeginUs = micActivityDisableEndUs = 0;
+  micActivityEdgesAtDisableBegin = micActivityEdgesAtDisableEnd = 0;
+  esp_err_t error = prepareMicrophoneActivityCounter(micActivityData, MIC_PDM_DATA, true);
+  if (error == ESP_OK) error = prepareMicrophoneActivityCounter(micActivityClock, MIC_PDM_CLK, false);
+  micActivityGpioAfter = readMicrophoneDataGpio();
+  gpio_io_config_t after = {};
+  gpio_get_io_config(static_cast<gpio_num_t>(MIC_PDM_DATA), &after);
+  if (error == ESP_OK && (after.ie != data.ie || after.oe != data.oe || after.pu != data.pu || after.pd != data.pd || after.fun_sel != data.fun_sel)) error = ESP_ERR_INVALID_STATE;
+  if (error != ESP_OK) {
+    micActivityError = esp_err_to_name(error);
+    releaseMicrophoneActivityCounter(micActivityData);
+    releaseMicrophoneActivityCounter(micActivityClock);
+    return false;
+  }
+  while (xSemaphoreTake(micActivityStopped, 0) == pdTRUE) {}
+  int initialData = 0, initialClock = 0;
+  pcnt_unit_get_count(micActivityData.unit, &initialData);
+  pcnt_unit_get_count(micActivityClock.unit, &initialClock);
+  micActivityData.previousRaw = static_cast<uint32_t>(initialData);
+  micActivityClock.previousRaw = static_cast<uint32_t>(initialClock);
+  micActivityStartedUs = esp_timer_get_time();
+  micActivityStopRequested = false;
+  micActivityActive = true;
+  if (xTaskCreatePinnedToCore(runMicrophoneActivityMonitor, "mic-data-edges", 8192, nullptr, 3, nullptr, 1) != pdPASS) {
+    micActivityActive = false;
+    micActivityError = "could not create edge monitor task";
+    releaseMicrophoneActivityCounter(micActivityData);
+    releaseMicrophoneActivityCounter(micActivityClock);
+    return false;
+  }
+  return true;
+}
+
+void stopMicrophoneActivityMonitor() {
+  if (!micActivityActive) return;
+  micActivityStopRequested = true;
+  xSemaphoreTake(micActivityStopped, portMAX_DELAY);
+}
+
+void markMicrophoneActivityDisable(bool after) {
+  if (!micActivityActive) return;
+  xSemaphoreTake(micActivityMutex, portMAX_DELAY);
+  if (!micActivityActive || !micActivityData.unit) { xSemaphoreGive(micActivityMutex); return; }
+  int raw = 0;
+  pcnt_unit_get_count(micActivityData.unit, &raw);
+  const uint64_t total = micActivityData.total + (static_cast<uint32_t>(raw) - micActivityData.previousRaw);
+  if (after) {
+    micActivityDisableEndUs = esp_timer_get_time();
+    micActivityEdgesAtDisableEnd = total;
+  } else {
+    micActivityDisableBeginUs = esp_timer_get_time();
+    micActivityEdgesAtDisableBegin = total;
+  }
+  xSemaphoreGive(micActivityMutex);
+}
+
+String microphoneActivityBinJson(const MicActivityBin &bin) {
+  String body = "{\"endUs\":" + String(static_cast<long long>(bin.endUs));
+  body += ",\"durationUs\":" + String(bin.durationUs);
+  body += ",\"dataTransitions\":" + String(bin.dataEdges);
+  body += ",\"clockRisingEdges\":" + String(bin.clockEdges);
+  body += ",\"rxEnabled\":" + String(bin.rxEnabled ? "true" : "false");
+  body += ",\"dataLevel\":" + String(bin.dataLevel);
+  body += ",\"counterCleared\":" + String(bin.counterCleared ? "true" : "false") + '}';
+  return body;
+}
+
+void sendMicrophoneActivity() {
+  const size_t bytes = (MIC_ACTIVITY_FIRST_CAPACITY + MIC_ACTIVITY_RECENT_CAPACITY) * sizeof(MicActivityBin);
+  auto *copy = static_cast<MicActivityBin *>(heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (!copy) copy = static_cast<MicActivityBin *>(heap_caps_malloc(bytes, MALLOC_CAP_8BIT));
+  if (!copy) { diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"activity snapshot allocation failed\"}"); return; }
+  xSemaphoreTake(micActivityMutex, portMAX_DELAY);
+  String header = "{\"ok\":true,\"active\":" + String(micActivityActive ? "true" : "false");
+  header += ",\"startedUs\":" + String(static_cast<long long>(micActivityStartedUs));
+  header += ",\"disableBeginUs\":" + String(static_cast<long long>(micActivityDisableBeginUs));
+  header += ",\"disableEndUs\":" + String(static_cast<long long>(micActivityDisableEndUs));
+  header += ",\"dataTransitionsAtDisableBegin\":" + String(static_cast<unsigned long long>(micActivityEdgesAtDisableBegin));
+  header += ",\"dataTransitionsAtDisableEnd\":" + String(static_cast<unsigned long long>(micActivityEdgesAtDisableEnd));
+  header += ",\"totalDataTransitions\":" + String(static_cast<unsigned long long>(micActivityData.total));
+  header += ",\"totalClockRisingEdges\":" + String(static_cast<unsigned long long>(micActivityClock.total));
+  header += ",\"lastNonzeroDataWindowEndUs\":" + String(static_cast<long long>(micActivityLastNonzeroUs));
+  header += ",\"counterClears\":" + String(micActivityCounterClears);
+  header += ",\"error\":\"" + micActivityError + "\"";
+  header += ",\"gpioBeforeArm\":" + micActivityGpioBefore + ",\"gpioAfterArm\":" + micActivityGpioAfter;
+  header += ",\"currentGpio14\":" + readMicrophoneDataGpio() + ",\"firstWindows\":[";
+  const uint16_t firstCount = micActivityFirstCount, recentCount = micActivityRecentCount;
+  memcpy(copy, micActivityFirst, firstCount * sizeof(MicActivityBin));
+  for (uint16_t offset = 0; offset < recentCount; ++offset) {
+    const uint16_t index = (micActivityRecentHead + MIC_ACTIVITY_RECENT_CAPACITY - recentCount + offset) % MIC_ACTIVITY_RECENT_CAPACITY;
+    copy[firstCount + offset] = micActivityRecent[index];
+  }
+  xSemaphoreGive(micActivityMutex); // network delivery must not block sampling
+  diagnosticServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  diagnosticServer.send(200, "application/json", header);
+  for (uint16_t index = 0; index < firstCount; ++index) {
+    if (index) diagnosticServer.sendContent(",");
+    diagnosticServer.sendContent(microphoneActivityBinJson(copy[index]));
+  }
+  diagnosticServer.sendContent("],\"recentWindows\":[");
+  for (uint16_t offset = 0; offset < recentCount; ++offset) {
+    if (offset) diagnosticServer.sendContent(",");
+    diagnosticServer.sendContent(microphoneActivityBinJson(copy[firstCount + offset]));
+  }
+  diagnosticServer.sendContent("]}");
+  diagnosticServer.sendContent("");
+  heap_caps_free(copy);
+}
+
+void startMicrophoneActivityTrace() {
+  if (micComparisonPhase || micTraceRunning || micClockHeld || !microphonesReady) {
+    diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"restore normal capture before starting an activity trace\"}");
+    return;
+  }
+  micActivityRequested = true;
+  startMicrophoneRestoreTrace();
+  if (!micComparisonPhase) micActivityRequested = false;
+}
+
+void stopMicrophoneActivity() {
+  micActivityRequested = false;
+  stopMicrophoneActivityMonitor();
+  sendMicrophoneActivity(); // leave checkpoint 1, clock and GPIO state held
+}
+
+void runMicrophoneRestoreTrace(void *) {
+  micTraceTask = xTaskGetCurrentTaskHandle();
+  micTraceRunning = true;
+  const bool ok = restoreMicrophoneCapture();
+  xSemaphoreTake(micTraceMutex, portMAX_DELAY);
+  micTraceWaiting = false;
+  micTraceState = ok ? (micTraceAbort ? "aborted-restored" : "complete") : "restore-failed";
+  micTraceRunning = false;
+  micTraceTask = nullptr;
+  xSemaphoreGive(micTraceMutex);
+  micComparisonResult = ok ? "complete" : "restore-failed";
+  vTaskDelete(nullptr);
+}
+
+void startMicrophoneRestoreTrace() {
+  if (!micTraceMutex || !micTraceProceed) { diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"trace mutex unavailable\"}"); return; }
+  if (micComparisonPhase || micTraceRunning || micClockHeld || !microphonesReady) {
+    diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"restore normal capture before starting a trace\"}");
+    return;
+  }
+  xSemaphoreTake(micTraceMutex, portMAX_DELAY);
+  for (auto &log : micTraceLogs) log = "";
+  micTraceCount = 0;
+  micTraceWaiting = false;
+  micTraceState = "comparison-running";
+  xSemaphoreGive(micTraceMutex);
+  while (xSemaphoreTake(micTraceProceed, 0) == pdTRUE) {}
+  micTraceRequested = true;
+  startMicrophoneRxComparison();
+  if (!micComparisonPhase) micTraceRequested = false;
+}
+
+void sendMicrophoneRestoreTrace() {
+  xSemaphoreTake(micTraceMutex, portMAX_DELAY);
+  String header = "{\"ok\":true,\"state\":\"" + micTraceState + "\"";
+  header += ",\"waiting\":" + String(micTraceWaiting ? "true" : "false");
+  header += ",\"currentStep\":" + String(micTraceCount ? micTraceCount - 1 : -1);
+  header += ",\"checkpointAgeMs\":" + String(micTraceWaiting ? millis() - micTraceCheckpointAt : 0);
+  header += ",\"checkpoints\":[";
+  diagnosticServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  diagnosticServer.send(200, "application/json", header);
+  for (uint8_t index = 0; index < micTraceCount; ++index) {
+    if (index) diagnosticServer.sendContent(",");
+    diagnosticServer.sendContent(micTraceLogs[index]);
+  }
+  diagnosticServer.sendContent("]}");
+  diagnosticServer.sendContent("");
+  xSemaphoreGive(micTraceMutex);
+}
+
+void advanceMicrophoneRestoreTrace() {
+  xSemaphoreTake(micTraceMutex, portMAX_DELAY);
+  if (!micTraceRunning || !micTraceWaiting || !diagnosticServer.hasArg("step") ||
+      diagnosticServer.arg("step") != String(micTraceCount - 1) || millis() - micTraceCheckpointAt < 1000) {
+    xSemaphoreGive(micTraceMutex);
+    diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"supply the current step; checkpoint must be paused for at least 1 second\"}");
+    return;
+  }
+  micTraceWaiting = false;
+  xSemaphoreGive(micTraceProceed);
+  xSemaphoreGive(micTraceMutex);
+  diagnosticServer.send(200, "application/json", "{\"ok\":true,\"advanced\":true}");
+}
+
+void abortMicrophoneRestoreTrace() {
+  xSemaphoreTake(micTraceMutex, portMAX_DELAY);
+  if (!micTraceRunning) {
+    xSemaphoreGive(micTraceMutex);
+    micTraceRequested = false;
+    const bool ok = restoreMicrophoneCapture();
+    diagnosticServer.send(ok ? 200 : 500, "application/json", "{\"ok\":" + String(ok ? "true" : "false") + '}');
+    return;
+  }
+  micTraceAbort = true;
+  micTraceWaiting = false;
+  xSemaphoreGive(micTraceProceed);
+  xSemaphoreGive(micTraceMutex);
+  diagnosticServer.send(200, "application/json", "{\"ok\":true,\"restorationInProgress\":true}");
+}
+
+void pollMicrophoneRxComparison() {
+  if (!micComparisonPhase || micComparisonPhase == 3 || millis() - micComparisonPhaseAt < 30000) return;
+  if (micComparisonPhase == 1) {
+    micComparisonFirstDuration = millis() - micComparisonPhaseAt;
+    // This is the entire transition: no GPIO reconfiguration or clock change.
+    micComparisonBefore = readMicrophoneDataGpio();
+    const esp_err_t error = i2s_channel_enable(micComparisonRx);
+    micComparisonAfter = readMicrophoneDataGpio();
+    Serial.printf("Mic RX comparison before: %s\nafter: %s\n", micComparisonBefore.c_str(), micComparisonAfter.c_str());
+    if (error != ESP_OK) {
+      micComparisonError = esp_err_to_name(error);
+      restoreMicrophoneCapture();
+      micComparisonResult = "failed";
+      return;
+    }
+    micComparisonRxEnabled = true;
+    micComparisonPhase = 2;
+    micComparisonPhaseAt = millis();
+    micComparisonResult = "rx-enabled";
+  } else {
+    micComparisonSecondDuration = millis() - micComparisonPhaseAt;
+    micComparisonEnd = readMicrophoneDataGpio();
+    if (micTraceRequested) {
+      micTraceRequested = false;
+      micComparisonPhase = 3;
+      micComparisonResult = "restore-trace";
+      micTraceAbort = false;
+      micTraceRunning = true;
+      const BaseType_t created = xTaskCreatePinnedToCore(runMicrophoneRestoreTrace, "mic-restore-trace", 16384, nullptr, 1, nullptr, 1);
+      if (created == pdPASS) return;
+      micTraceRunning = false;
+      micComparisonError = "could not create restore trace task";
+    }
+    // Both measurement windows are over. Restore normal master-mode capture.
+    restoreMicrophoneCapture();
+    micComparisonResult = microphonesReady ? "complete" : "restore-failed";
+  }
 }
 
 void sendMicrophoneWav() {
@@ -1905,19 +2711,29 @@ bool queueSpeakerPcm(const uint8_t *data, size_t bytes) {
   return true;
 }
 
-void receiveSpeakerPcm() {
-  HTTPUpload &upload = diagnosticServer.upload();
+void receiveSpeakerPcmFrom(WebServer &server, bool &accepted, bool dedicated) {
+  HTTPUpload &upload = server.upload();
   if (upload.status == UPLOAD_FILE_START) {
-    if (speakerPcmStreaming) {
-      speakerPcmUploadFailed = true;
-      return;
-    }
+    accepted = speakerControlMutex && xSemaphoreTake(speakerControlMutex, 0) == pdTRUE;
+    if (!accepted) return;
+    if (speakerPcmStreaming) { accepted = false; xSemaphoreGive(speakerControlMutex); return; }
+    // Reserve the speaker before preparing it; diagnostic tones/chimes must
+    // not reconfigure I2S while the dedicated upload is being initialized.
+    speakerPcmPreparing = true;
+    speakerPcmStreaming = true;
     speakerPcmQueuedBytes = 0;
     speakerPcmPlayedBytes = 0;
     speakerPcmPendingSize = 0;
     speakerPcmUploadComplete = false;
-    speakerPcmUploadFailed = !prepareSpeakerPcmStream();
-    if (!speakerPcmUploadFailed) speakerPcmStreaming = true;
+    if (dedicated) {
+      const bool locked = xSemaphoreTake(boardIoMutex, pdMS_TO_TICKS(5000)) == pdTRUE;
+      speakerPcmUploadFailed = !locked || !prepareSpeakerPcmStream();
+      if (locked) xSemaphoreGive(boardIoMutex);
+    } else speakerPcmUploadFailed = !prepareSpeakerPcmStream();
+    if (speakerPcmUploadFailed) { speakerPcmStreaming = false; speakerPcmUploadComplete = true; }
+    speakerPcmPreparing = false;
+  } else if (!accepted) {
+    return;
   } else if (upload.status == UPLOAD_FILE_WRITE) {
     if (speakerPcmUploadFailed) return;
     const uint8_t *data = upload.buf;
@@ -1947,28 +2763,54 @@ void receiveSpeakerPcm() {
   } else if (upload.status == UPLOAD_FILE_ABORTED) {
     speakerPcmUploadFailed = true;
     speakerPcmUploadComplete = true;
+    // An aborted request may never reach the final response handler.
+    accepted = false;
+    xSemaphoreGive(speakerControlMutex);
   }
 }
 
-void sendSpeakerPcm() {
+void sendSpeakerPcmResult(WebServer &server) {
   if (!speakerReady) {
-    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"speaker I2S unavailable\"}");
+    server.send(503, "application/json", "{\"ok\":false,\"error\":\"speaker I2S unavailable\"}");
     return;
   }
   if (!speakerAmpEnabled) {
-    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"speaker amplifier P4 enable failed\"}");
+    server.send(503, "application/json", "{\"ok\":false,\"error\":\"speaker amplifier P4 enable failed\"}");
     return;
   }
   speakerPcmUploadComplete = true;
   const uint32_t deadline = millis() + 5000;
   while (speakerPcmStreaming && millis() < deadline) delay(1);
   if (speakerPcmStreaming || speakerPcmUploadFailed || speakerPcmPendingSize || !speakerPcmQueuedBytes) {
-    diagnosticServer.send(400, "application/json", "{\"ok\":false,\"error\":\"PCM missing, unaligned, or I2S write failed\"}");
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"PCM missing, unaligned, or I2S write failed\"}");
     return;
   }
-  diagnosticServer.send(200, "application/json",
+  server.send(200, "application/json",
     "{\"ok\":true,\"bytes\":" + String(speakerPcmPlayedBytes) +
     ",\"boardBufferBytes\":" + String(SPEAKER_BUFFER_CHUNKS * SPEAKER_CHUNK_BYTES) + "}");
+}
+
+void finishSpeakerPcm(WebServer &server, bool &accepted) {
+  if (!accepted) {
+    server.send(409, "application/json", "{\"ok\":false,\"error\":\"speaker already in use or upload aborted\"}");
+    return;
+  }
+  sendSpeakerPcmResult(server);
+  accepted = false;
+  xSemaphoreGive(speakerControlMutex);
+}
+
+void speakerHttpTask(void *) {
+  for (;;) { speakerServer.handleClient(); vTaskDelay(pdMS_TO_TICKS(2)); }
+}
+
+void handleSpeakerDiagnostic(void (*handler)()) {
+  if (!speakerControlMutex || xSemaphoreTake(speakerControlMutex, 0) != pdTRUE) {
+    diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"speaker already in use\"}");
+    return;
+  }
+  handler();
+  xSemaphoreGive(speakerControlMutex);
 }
 
 bool parseByteArg(const char *name, uint8_t *out) {
@@ -1982,6 +2824,35 @@ bool parseByteArg(const char *name, uint8_t *out) {
   if (n < 0 || n > 255) return false;
   *out = static_cast<uint8_t>(n);
   return true;
+}
+
+void controlIrBank() {
+  // Rev 1.3: P5 drives the single AO3400A gate through SW1 (positions 1–2).
+  // Preserve sensor reset pins, speaker enable and auxiliary P6/P7 settings.
+  static constexpr uint8_t irMask = 1U << 5;
+  uint8_t output = 0, direction = 0;
+  if (!readRegister8(TCA9534_ADDRESS, 0x01, &output) ||
+      !readRegister8(TCA9534_ADDRESS, 0x03, &direction)) {
+    diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"IR expander unavailable\"}");
+    return;
+  }
+  if (diagnosticServer.method() == HTTP_POST) {
+    const String enabled = diagnosticServer.arg("enabled");
+    if (enabled != "0" && enabled != "1") {
+      diagnosticServer.send(400, "application/json", "{\"ok\":false,\"error\":\"enabled must be 0 or 1\"}");
+      return;
+    }
+    const uint8_t nextOutput = enabled == "1" ? output | irMask : output & ~irMask;
+    if (!writeExpander(0x01, nextOutput) || !writeExpander(0x03, direction & ~irMask)) {
+      diagnosticServer.send(503, "application/json", "{\"ok\":false,\"error\":\"IR control failed\"}");
+      return;
+    }
+    output = nextOutput;
+    direction &= ~irMask;
+  }
+  diagnosticServer.send(200, "application/json", "{\"ok\":true,\"enabled\":" +
+    String(!(direction & irMask) && (output & irMask) ? "true" : "false") +
+    ",\"control\":\"expander P5; all three emitters; SW1 positions 1-2\"}");
 }
 
 void setLed() {
@@ -2300,6 +3171,19 @@ void setup() {
   initImu();
   initMicrophones();
   initSpeaker();
+  boardIoMutex = xSemaphoreCreateMutex();
+  speakerControlMutex = xSemaphoreCreateMutex();
+  if (boardIoMutex && speakerControlMutex && speakerReady) {
+    speakerServer.on("/health", HTTP_GET, [] {
+      speakerServer.send(200, "application/json", "{\"ok\":true,\"service\":\"psf-speaker\",\"port\":83}");
+    });
+    speakerServer.on("/speaker-pcm", HTTP_POST,
+      [] { finishSpeakerPcm(speakerServer, dedicatedSpeakerUploadAccepted); },
+      [] { receiveSpeakerPcmFrom(speakerServer, dedicatedSpeakerUploadAccepted, true); });
+    speakerServer.begin();
+    speakerHttpReady = xTaskCreatePinnedToCore(speakerHttpTask, "speaker-http", 8192, nullptr, 1, nullptr, 0) == pdPASS;
+    if (!speakerHttpReady) speakerServer.close();
+  }
 
   diagnosticServer.on("/diagnostics", HTTP_GET, sendDiagnostics);
   diagnosticServer.on("/camera/mirror", HTTP_POST, setCameraMirror);
@@ -2313,22 +3197,46 @@ void setup() {
   diagnosticServer.on("/wide-tof-config", HTTP_POST, setWideResolution);
   diagnosticServer.on("/imu", HTTP_GET, sendImu);
   diagnosticServer.on("/imu/zero", HTTP_POST, zeroImuOrientation);
-  diagnosticServer.on("/mic-levels", HTTP_GET, sendMicrophoneLevels);
-  diagnosticServer.on("/mic-pin-test", HTTP_GET, sendMicrophonePinTest);
-  diagnosticServer.on("/mic-live-pull-test", HTTP_GET, sendMicrophoneLivePullTest);
-  diagnosticServer.on("/mic-line-test", HTTP_GET, sendMicrophoneLineTest);
-  diagnosticServer.on("/mic-raw-clock-test", HTTP_GET, sendMicrophoneRawClockTest);
-  diagnosticServer.on("/mic-pcnt-test", HTTP_GET, sendMicrophonePcntTest);
-  diagnosticServer.on("/mic-clock-low", HTTP_POST, holdMicrophoneClockLow);
-  diagnosticServer.on("/mic-clock-high", HTTP_POST, holdMicrophoneClockHigh);
-  diagnosticServer.on("/mic-clock-edges", HTTP_GET, sendMicrophoneHeldClockEdges);
-  diagnosticServer.on("/mic-clock-restore", HTTP_POST, restoreMicrophoneClock);
-  diagnosticServer.on("/mic-capture.wav", HTTP_GET, sendMicrophoneWav);
-  diagnosticServer.on("/speaker-test", HTTP_POST, sendSpeakerTest);
-  diagnosticServer.on("/speaker-chime", HTTP_POST, sendSpeakerChime);
-  diagnosticServer.on("/startup-sequence", HTTP_POST, sendStartupSequence);
-  diagnosticServer.on("/speaker-pcm", HTTP_POST, sendSpeakerPcm, receiveSpeakerPcm);
+  micTraceMutex = xSemaphoreCreateMutex();
+  micTraceProceed = xSemaphoreCreateBinary();
+  micActivityMutex = xSemaphoreCreateMutex();
+  micActivityStopped = xSemaphoreCreateBinary();
+  diagnosticServer.on("/mic-data-activity", HTTP_GET, sendMicrophoneActivity);
+  diagnosticServer.on("/mic-data-activity", HTTP_POST, startMicrophoneActivityTrace);
+  diagnosticServer.on("/mic-data-activity-stop", HTTP_POST, stopMicrophoneActivity);
+  diagnosticServer.on("/mic-restore-trace", HTTP_GET, sendMicrophoneRestoreTrace);
+  diagnosticServer.on("/mic-restore-trace", HTTP_POST, startMicrophoneRestoreTrace);
+  diagnosticServer.on("/mic-restore-trace-next", HTTP_POST, advanceMicrophoneRestoreTrace);
+  diagnosticServer.on("/mic-restore-trace-abort", HTTP_POST, abortMicrophoneRestoreTrace);
+  diagnosticServer.on("/mic-rx-comparison", HTTP_GET, sendMicrophoneRxComparison);
+  diagnosticServer.on("/mic-rx-comparison", HTTP_POST, [] { if (micTraceRunning) { diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"restore trace owns microphone; use trace-abort\"}"); return; } startMicrophoneRxComparison(); });
+  diagnosticServer.on("/mic-gpio", HTTP_GET, sendMicrophoneGpio);
+  diagnosticServer.on("/mic-levels", HTTP_GET, [] { if (micTraceRunning) { diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"restore trace owns microphone; use trace-abort\"}"); return; } sendMicrophoneLevels(); });
+  diagnosticServer.on("/mic-pin-test", HTTP_GET, [] { if (micTraceRunning) { diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"restore trace owns microphone; use trace-abort\"}"); return; } sendMicrophonePinTest(); });
+  diagnosticServer.on("/mic-live-pull-test", HTTP_GET, [] { if (micTraceRunning) { diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"restore trace owns microphone; use trace-abort\"}"); return; } sendMicrophoneLivePullTest(); });
+  diagnosticServer.on("/mic-line-test", HTTP_GET, [] { if (micTraceRunning) { diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"restore trace owns microphone; use trace-abort\"}"); return; } sendMicrophoneLineTest(); });
+  diagnosticServer.on("/mic-raw-clock-test", HTTP_GET, [] { if (micTraceRunning) { diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"restore trace owns microphone; use trace-abort\"}"); return; } sendMicrophoneRawClockTest(); });
+  diagnosticServer.on("/mic-pcnt-test", HTTP_GET, [] { if (micTraceRunning) { diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"restore trace owns microphone; use trace-abort\"}"); return; } sendMicrophonePcntTest(); });
+  diagnosticServer.on("/mic-line-hold", HTTP_GET, sendMicrophoneLineHoldStatus);
+  diagnosticServer.on("/mic-data-high", HTTP_POST, [] { if (micTraceRunning) { diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"restore trace owns microphone; use trace-abort\"}"); return; } holdMicrophoneDataHigh(); });
+  diagnosticServer.on("/mic-data-low", HTTP_POST, [] { if (micTraceRunning) { diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"restore trace owns microphone; use trace-abort\"}"); return; } holdMicrophoneDataLow(); });
+  diagnosticServer.on("/mic-data-float", HTTP_POST, [] { if (micTraceRunning) { diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"restore trace owns microphone; use trace-abort\"}"); return; } holdMicrophoneDataFloat(); });
+  diagnosticServer.on("/mic-data-clock", HTTP_POST, [] { if (micTraceRunning) { diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"restore trace owns microphone; use trace-abort\"}"); return; } startMicrophoneFloatingDataClock(); });
+  diagnosticServer.on("/mic-line-restore", HTTP_POST, [] { if (micTraceRunning) { diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"restore trace owns microphone; use trace-abort\"}"); return; } restoreMicrophoneClock(); });
+  diagnosticServer.on("/mic-clock-low", HTTP_POST, [] { if (micTraceRunning) { diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"restore trace owns microphone; use trace-abort\"}"); return; } holdMicrophoneClockLow(); });
+  diagnosticServer.on("/mic-clock-high", HTTP_POST, [] { if (micTraceRunning) { diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"restore trace owns microphone; use trace-abort\"}"); return; } holdMicrophoneClockHigh(); });
+  diagnosticServer.on("/mic-clock-edges", HTTP_GET, [] { if (micTraceRunning) { diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"restore trace owns microphone; use trace-abort\"}"); return; } sendMicrophoneHeldClockEdges(); });
+  diagnosticServer.on("/mic-clock-restore", HTTP_POST, [] { if (micTraceRunning) { diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"restore trace owns microphone; use trace-abort\"}"); return; } restoreMicrophoneClock(); });
+  diagnosticServer.on("/mic-capture.wav", HTTP_GET, [] { if (micTraceRunning) { diagnosticServer.send(409, "application/json", "{\"ok\":false,\"error\":\"restore trace owns microphone; use trace-abort\"}"); return; } sendMicrophoneWav(); });
+  diagnosticServer.on("/speaker-test", HTTP_POST, [] { handleSpeakerDiagnostic(sendSpeakerTest); });
+  diagnosticServer.on("/speaker-chime", HTTP_POST, [] { handleSpeakerDiagnostic(sendSpeakerChime); });
+  diagnosticServer.on("/startup-sequence", HTTP_POST, [] { handleSpeakerDiagnostic(sendStartupSequence); });
+  diagnosticServer.on("/speaker-pcm", HTTP_POST,
+    [] { finishSpeakerPcm(diagnosticServer, legacySpeakerUploadAccepted); },
+    [] { receiveSpeakerPcmFrom(diagnosticServer, legacySpeakerUploadAccepted, false); });
   diagnosticServer.on("/led", HTTP_GET, setLed);
+  diagnosticServer.on("/ir", HTTP_GET, controlIrBank);
+  diagnosticServer.on("/ir", HTTP_POST, controlIrBank);
   diagnosticServer.on("/uno/status", HTTP_GET, sendUnoStatus);
   diagnosticServer.on("/uno/baud", HTTP_POST, setUnoBaud);
   diagnosticServer.on("/uno/pins", HTTP_POST, setUnoPins);
@@ -2356,7 +3264,9 @@ void setup() {
 void loop() {
   // Arduino's loop task is pinned to core 1. Package sensor responses here
   // alongside acquisition; camera serving and TCP/IP run on core 0.
+  if (boardIoMutex) xSemaphoreTake(boardIoMutex, portMAX_DELAY);
   diagnosticServer.handleClient();
+  pollMicrophoneRxComparison();
   pollUnoDriveDeadline();
   pollUnoStartupLedClear();
   pollUnoUart();
@@ -2375,5 +3285,6 @@ void loop() {
       wideCapturedAt = capturedAt;
     }
   }
+  if (boardIoMutex) xSemaphoreGive(boardIoMutex);
   delay(2);
 }

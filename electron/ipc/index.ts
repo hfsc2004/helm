@@ -1,5 +1,7 @@
+import { registerLightHandlers } from "./lights.js";
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Pseudo Science Fiction
+import { registerAudioHandlers } from "./audio.js";
 import { ipcMain, BrowserWindow } from "electron";
 
 import { IPC } from "../../shared/ipc-channels.js";
@@ -66,6 +68,8 @@ import {
  */
 
 export function registerIpcHandlers(opts: { version: string }): void {
+  registerAudioHandlers();
+  registerLightHandlers();
   // ---------- app ----------
   ipcMain.handle(IPC.app.getVersion, async () => opts.version);
 

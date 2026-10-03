@@ -5,6 +5,58 @@ All notable changes to PSF Helm will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.10] - 2026-10-02
+
+### Added
+- Add a persistent Audio library below the Driver panel controls: search, add
+  local files, remove library entries without deleting originals, and play
+  sounds through the selected Sensor Board v1.3 robot's speaker.
+- Add an LED script library beneath Audio with New, Edit, Delete, Play,
+  Play Loop, and Stop. Open a separate editor window for named multi-line shows.
+- Program multiple lights concurrently per line, with independent RGBW colors,
+  white-channel intensity, Steady on/Flash behavior, flash count, and duration.
+  Add timed No Action lines, reorder steps, and preserve older single-light scripts.
+- Add a single IR bank target and firmware endpoint for expander P5; all three
+  emitters share one driver. ESP32 LED targets require verified GPIO mappings.
+- Add persistent microphone DATA/CLK high, low, floating-input and clock-only
+  tests, two-phase RX comparison, hardware register dumps, and an opt-in restore
+  trace with individual checkpoints held until explicitly advanced or aborted.
+- Add continuous DATA/clock edge counting around RX disable, preserving GPIO14
+  configuration and holding checkpoint 1 indefinitely for multimeter measurements.
+
+### Fixed
+- Keep Steady on lights illuminated across script lines and loop repeats;
+  Stop and show completion attempt to turn off every light the show touched.
+- Recover keyboard driving when the board reconnects after a flash, retry
+  bridge status, and show connection or command errors in the Driver panel.
+- Separate speaker streaming onto a dedicated core-0 HTTP task on port 83 so
+  light commands and sensor polling on core 1 can continue during audio uploads.
+  Serialize speaker ownership and I2C preparation; retain legacy port-82 playback.
+  Helm and the CLI discover the new endpoint automatically.
+
+### Validation
+- Desktop type checks and production builds passed. Mocked checks cover library
+  persistence, independent concurrent light timelines, steady headlights,
+  loops/Stop/error cleanup, timed pauses, old scripts, and drive reconnection.
+- Real WAV decoding and multipart uploads passed against a local test server;
+  source audio remained unchanged. Dedicated speaker discovery/fallback passed.
+- Sensor-board firmware compiled and was flashed to the original ESP32-S3
+  with flash hashes verified. Concurrent sound/light operation after this flash
+  remains to be checked on the robot.
+- User confirmed multiple sound effects played. Restore checkpoints isolated
+  GPIO14's sustained ~3 V to `gpio_reset_pin()`, which enabled its pull-up.
+  The held RX-off test counted a 2.048 MHz clock, no DATA edges in its first five
+  seconds, then 68 sparse edges around 7.8 seconds followed by inactivity.
+
+### Known issues
+- Microphone audio remains unresolved; sparse DATA edges do not demonstrate
+  valid PDM. The normal restore path is instrumented, not repaired.
+- Onboard RGB LEDs sharing GPIO48 with the sensor-board chain cannot be
+  isolated through script target selection alone; module wiring needs verification.
+- IR control requires the updated firmware and SW1 in expander positions 1–2.
+  ESP32-LED4/LED5 playback is unavailable until their GPIO mappings are established.
+- Restart Helm after updating its main/preload processes.
+
 ## [0.3.9] - 2026-10-02
 
 ### Added

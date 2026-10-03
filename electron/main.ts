@@ -6,6 +6,7 @@ import { join } from "node:path";
 
 import * as bmoc from "../core/bmoc/index.js";
 import * as controlPlane from "../core/control-plane/server.js";
+import { stopLightShows } from "./ipc/lights.js";
 import { registerIpcHandlers } from "./ipc/index.js";
 
 const isDev = !app.isPackaged;
@@ -91,6 +92,7 @@ app.on("before-quit", async (event) => {
   // Reap every BMOC-tracked session (subscriptions, child processes) before
   // the process exits.
   event.preventDefault();
+  await stopLightShows();
   try {
     await controlPlane.stop();
   } catch {

@@ -208,6 +208,40 @@ npm run helm -- vehicle-list    # what vehicles you've registered
 
 The CLI is also what an LLM Captain uses (see [How to actually hand the wheel to a frontier model](#how-to-actually-hand-the-wheel-to-a-frontier-model)).
 
+The Driver panel includes an **Audio** library at the bottom of the right rail
+for Sensor Board v1.3 vehicles. Search or select a file, then use **Play to robot**
+to send it to the selected robot's speaker. **Add…** opens a file browser;
+**Remove** removes only the library entry and keeps the original file. Entries
+persist across restarts and initially include existing files in
+`Sensor_Board_v1.3/audio` when that local directory is present. Keep
+added files at their original paths. Playback requires `ffmpeg` on PATH and a
+reachable speaker endpoint (port 83 on updated firmware, port 82 on older builds); WAV, MP3, OGG, FLAC, M4A, and AAC are
+supported. Restart Helm after updating to load the new desktop audio controls.
+Keyboard driving retries the board connection after a flash; the Driver panel
+shows bridge status and errors. Click outside library search fields before using
+WASD or NumPad controls.
+
+Below Audio, the **LEDs** library stores named light-show scripts. **New…** and
+**Edit** open a separate editor window; add or reorder lines, select multiple lights
+per line and program each independently, set RGB and the independent white channel for LED1–LED3, and choose
+behavior, flash count and duration in milliseconds. **Steady on** keeps a light
+on between lines and loop repeats; **Flash** uses equal on/off durations;
+lights in a line play together, and lines advance after the longest selected
+light finishes. **No Action** adds a timed pause without issuing light
+commands. Save to the persistent library, then **Play**, **Stop**,
+or **Delete** from the panel. The wrapped play-arrow **Play Loop** button
+repeats the entire show until **Stop** is pressed. Stop cancels waits and turns
+off the lights used by the show. Shows run in Helm, so leave Helm open while playing.
+Network request time adds to each programmed interval. A show stops on command
+failure, reports the error, and attempts to turn off all lights it touched.
+
+The single **IR** target controls all three emitters together through expander
+P5. It needs the new `/ir` firmware endpoint and SW1 set to positions 1–2.
+ESP32-LED4 and ESP32-LED5 are available as script targets, but playback refuses
+those lines until the module's control GPIOs are identified. No pins are guessed.
+
+
+
 ## Two surfaces, one core
 
 PSF Helm exposes the same logic two ways:

@@ -8,3 +8,10 @@ you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
     http://www.apache.org/licenses/LICENSE-2.0
+
+Third-party microphone instrumentation:
+firmware/templates/sensor-board-v1-3-esp32s3/src/mic_trace_i2s contains an
+instrumented, renamed copy of Espressif Arduino ESP32 3.3.7 ESP_I2S sources.
+Those files retain their upstream LGPL 2.1 licensing rather than this project's
+Apache 2.0 license. See that directory's README.md and LICENSE.md for provenance,
+modifications, and the license text.

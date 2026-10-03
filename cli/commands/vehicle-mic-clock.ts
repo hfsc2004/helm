@@ -8,12 +8,13 @@ import * as registry from "../../core/vehicles/registry.js";
 register({
   def: {
     name: "vehicle-mic-clock",
-    summary: "Hold a v1.3 sensor board's microphone clock low or high, count held-clock edges, or restore PDM capture.",
+    summary: "Microphone Data/Clock line Test: hold CLK or weak-pull DATA high/low, read status, or restore capture.",
     args: [
       { name: "id", kind: "string", required: true, description: "Vehicle id or name." },
-      { name: "action", kind: "string", required: true, description: "low | high | edges | restore" },
+      { name: "action", kind: "string", required: true, description: "low | high | edges | restore | data-high | data-low | data-float | data-clock | gpio | compare-start | compare-status | trace-start | trace-status | trace-next | trace-abort | activity-start | activity-status | activity-stop | status" },
     ],
     flags: [
+      { name: "step", kind: "number", description: "Current trace checkpoint index; required for trace-next." },
       { name: "base-url", kind: "string", description: "Sensor board diagnostics URL; defaults to camera host on port 82." },
     ],
     streams: false,
@@ -28,8 +29,12 @@ register({
   async run({ args, flags }) {
     const id = String(args["id"] ?? "").trim();
     const action = String(args["action"] ?? "").trim().toLowerCase();
-    if (!id || (action !== "low" && action !== "high" && action !== "edges" && action !== "restore")) {
-      emit({ error: "vehicle-mic-clock requires <id> <low|high|edges|restore>." });
+    if (!id || (!["low", "high", "edges", "restore", "data-high", "data-low", "data-float", "data-clock", "gpio", "compare-start", "compare-status", "trace-start", "trace-status", "trace-next", "trace-abort", "activity-start", "activity-status", "activity-stop", "status"].includes(action))) {
+      emit({ error: "vehicle-mic-clock requires <id> <low|high|edges|restore|data-high|data-low|data-float|data-clock|gpio|compare-start|compare-status|trace-start|trace-status|trace-next|trace-abort|activity-start|activity-status|activity-stop|status>." });
+      return 64;
+    }
+    if (action === "trace-next" && (!Number.isInteger(Number(flags["step"])) || Number(flags["step"]) < 0)) {
+      emit({ error: "trace-next requires --step with the current checkpoint index." });
       return 64;
     }
     const vehicle = registry.get(id) ?? registry.findByName(id);
@@ -46,13 +51,14 @@ register({
       const base = new URL(String(flags["base-url"] ?? vehicle.camera!.baseUrl));
       if (base.protocol !== "http:") throw new Error("HTTP is required");
       if (!flags["base-url"]) base.port = "82";
-      endpoint = new URL(action === "restore" ? "/mic-clock-restore" : `/mic-clock-${action}`, base);
+      endpoint = new URL(action === "restore" ? "/mic-clock-restore" : action.startsWith("activity-") ? (action === "activity-stop" ? "/mic-data-activity-stop" : "/mic-data-activity") : action.startsWith("trace-") ? (action === "trace-next" ? "/mic-restore-trace-next" : action === "trace-abort" ? "/mic-restore-trace-abort" : "/mic-restore-trace") : action.startsWith("compare-") ? "/mic-rx-comparison" : action === "gpio" ? "/mic-gpio" : action === "status" ? "/mic-line-hold" : action.startsWith("data-") ? `/mic-${action}` : `/mic-clock-${action}`, base);
+      if (action === "trace-next") endpoint.searchParams.set("step", String(flags["step"]));
     } catch (error) {
       emit({ error: error instanceof Error ? error.message : String(error) });
       return 1;
     }
     try {
-      const response = await fetch(endpoint, { method: action === "edges" ? "GET" : "POST", signal: AbortSignal.timeout(5000) });
+      const response = await fetch(endpoint, { method: action === "edges" || action === "status" || action === "gpio" || action === "compare-status" || action === "trace-status" || action === "activity-status" ? "GET" : "POST", signal: AbortSignal.timeout(action.startsWith("activity-") ? 20000 : 5000) });
       const body = await response.json() as Record<string, unknown>;
       emit({ action, ...body });
       return response.ok && body.ok === true ? 0 : 1;

@@ -350,3 +350,26 @@ helm describe                              # full schema, authoritative
 ```
 
 That's the whole job. Drive small, snap often, trust the guard, ask the human when unsure.
+
+For sustained multimeter microphone checks, use `helm vehicle-mic-clock <id> data-high|data-low|high|low|status|restore`. DATA uses weak pulls with CLK stopped; holds persist until restore or reboot. Restore normal capture after testing.
+
+
+Audio and lights (Sensor Board v1.3): `helm vehicle-speaker-play <id> <file>`
+uses local ffmpeg decoding, probes the dedicated core-0 speaker service on port
+83, and falls back to port 82 for older firmware. Source audio is unchanged.
+Helm's Driver panel has Audio and LED script libraries. Multiple LEDs in a
+script line run concurrently with independent colors/timing; lines advance
+when all selected actions finish. Steady on persists between lines/loop repeats,
+Flash alternates on/off, and No Action is a timed pause. Play Loop repeats until
+Stop. Stop/completion attempts to turn off all touched lights. IR is one shared
+bank on expander P5; do not claim independent IR1/IR2/IR3 control. ESP32 onboard
+LED mappings remain unresolved, and an RGB LED wired to GPIO48 shares the
+sensor-board color stream. Never change hardware pin mappings by guesswork.
+
+Microphone investigation: `vehicle-mic-clock` also provides `gpio`,
+`compare-start|compare-status`, `trace-start|trace-status|trace-next --step N|trace-abort`,
+and `activity-start|activity-status|activity-stop`. Trace checkpoints wait for an
+explicit advance; activity-start holds RX-off checkpoint 1 indefinitely. Activity
+stop stops counting only, leaving the held clock/line condition. Use trace-abort
+only when restoration is requested. GPIO14 reset enabling a pull-up was measured
+as the first sustained DATA-voltage rise; valid microphone capture is unresolved.

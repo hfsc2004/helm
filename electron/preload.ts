@@ -46,6 +46,22 @@ const CH = {
 };
 
 const api = {
+  lights: {
+    list: () => ipcRenderer.invoke("lights:list"),
+    get: (id: string) => ipcRenderer.invoke("lights:get", id),
+    save: (script: unknown) => ipcRenderer.invoke("lights:save", script),
+    remove: (id: string) => ipcRenderer.invoke("lights:remove", id),
+    editor: (id?: string) => ipcRenderer.invoke("lights:editor", id),
+    play: (req: unknown) => ipcRenderer.invoke("lights:play", req),
+    stop: () => ipcRenderer.invoke("lights:stop"),
+    status: () => ipcRenderer.invoke("lights:status"),
+  },
+  audio: {
+    list: () => ipcRenderer.invoke("audio:list"),
+    add: () => ipcRenderer.invoke("audio:add"),
+    remove: (id: string) => ipcRenderer.invoke("audio:remove", id),
+    play: (req: unknown) => ipcRenderer.invoke("audio:play", req),
+  },
   app: {
     getVersion: () => ipcRenderer.invoke(CH.appGetVersion),
   },
